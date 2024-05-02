@@ -2508,8 +2508,11 @@ func (d *AuthenticatedGossiper) handleChanAnnouncement(nMsg *networkMsg,
 		BitcoinKey2Bytes: ann.BitcoinKey2,
 		AuthProof:        proof,
 		Features:         featureBuf.Bytes(),
-		TapscriptRoot:    nMsg.optionalMsgFields.tapscriptRoot,
 		ExtraOpaqueData:  ann.ExtraOpaqueData,
+	}
+
+	if nMsg.optionalMsgFields != nil {
+		edge.TapscriptRoot = nMsg.optionalMsgFields.tapscriptRoot
 	}
 
 	// If there were any optional message fields provided, we'll include
