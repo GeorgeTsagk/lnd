@@ -946,6 +946,9 @@ func (s *Switch) getLocalLink(pkt *htlcPacket, htlc *lnwire.UpdateAddHTLC) (
 func (s *Switch) handleLocalResponse(pkt *htlcPacket) {
 	defer s.wg.Done()
 
+	// TODO(george): sender hold time can be derived from payment lifecycle
+	fmt.Printf("### handleLocalResponse, hold to be derived higher\n")
+
 	attemptID := pkt.incomingHTLCID
 
 	// The error reason will be unencypted in case this a local
@@ -1254,7 +1257,8 @@ func (s *Switch) failAddPacket(packet *htlcPacket, failure *LinkError) error {
 		obfuscator:      packet.obfuscator,
 		linkFailure:     failure,
 		htlc: &lnwire.UpdateFailHTLC{
-			Reason: reason,
+			Reason:    reason,
+			ExtraData: []byte{1, 2, 3},
 		},
 	}
 
@@ -3158,16 +3162,32 @@ func (s *Switch) handlePacketFail(packet *htlcPacket,
 			packet.incomingChanID, packet.incomingHTLCID,
 			packet.outgoingChanID, packet.outgoingHTLCID)
 
-		htlc.Reason = circuit.ErrorEncrypter.EncryptMalformedError(
+		htlc.Reason, err = circuit.ErrorEncrypter.EncryptMalformedError(
 			htlc.Reason,
 		)
+		if err != nil {
+			return err
+		}
 
 	default:
+		inLink, err := s.GetLinkByShortID(packet.incomingChanID)
+		if err != nil {
+			return err
+		}
+
+		if inLink != nil {
+			addTime := inLink.LookUpRemoteAddTimeByHTLCIndex(packet.circuit.Incoming.HtlcID)
+			fmt.Printf("### handle packet fail extra=%v, hold=%v\n", htlc.ExtraData, time.Since(addTime))
+		}
+
 		// Otherwise, it's a forwarded error, so we'll perform a
 		// wrapper encryption as normal.
-		htlc.Reason = circuit.ErrorEncrypter.IntermediateEncrypt(
+		htlc.Reason, err = circuit.ErrorEncrypter.IntermediateEncrypt(
 			htlc.Reason,
 		)
+		if err != nil {
+			return err
+		}
 	}
 
 	// Deliver this packet.

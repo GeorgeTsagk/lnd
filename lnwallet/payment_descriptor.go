@@ -2,6 +2,7 @@ package lnwallet
 
 import (
 	"crypto/sha256"
+	"time"
 
 	"github.com/lightningnetwork/lnd/channeldb"
 	"github.com/lightningnetwork/lnd/graph/db/models"
@@ -229,6 +230,14 @@ type paymentDescriptor struct {
 	// CustomRecords also stores the set of optional custom records that
 	// may have been attached to a sent HTLC.
 	CustomRecords lnwire.CustomRecords
+
+	// AddTime is the timestamp at which the HTLC add happened over the
+	// incoming channel.
+	AddTime time.Time
+
+	// FailExtraData stores any extra opaque data that may have been present
+	// when receiving an UpdateFailHTLC message.
+	FailExtraData lnwire.ExtraOpaqueData
 }
 
 // toLogUpdate recovers the underlying LogUpdate from the paymentDescriptor.
@@ -257,9 +266,10 @@ func (pd *paymentDescriptor) toLogUpdate() channeldb.LogUpdate {
 		}
 	case Fail:
 		msg = &lnwire.UpdateFailHTLC{
-			ChanID: pd.ChanID,
-			ID:     pd.ParentIndex,
-			Reason: pd.FailReason,
+			ChanID:    pd.ChanID,
+			ID:        pd.ParentIndex,
+			Reason:    pd.FailReason,
+			ExtraData: pd.FailExtraData,
 		}
 	case MalformedFail:
 		msg = &lnwire.UpdateFailMalformedHTLC{

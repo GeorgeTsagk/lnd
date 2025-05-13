@@ -2,12 +2,16 @@ package hop
 
 import (
 	"bytes"
+	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/btcsuite/btcd/btcec/v2"
 	sphinx "github.com/lightningnetwork/lightning-onion"
 	"github.com/lightningnetwork/lnd/lnwire"
+	"github.com/lightningnetwork/lnd/tlv"
 )
 
 // EncrypterType establishes an enum used in serialization to indicate how to
@@ -37,13 +41,36 @@ const (
 	// the same functionality as a EncrypterTypeSphinx, but is used to mark
 	// our special-case error handling.
 	EncrypterTypeRelaying = 4
+
+	// A set of tlv type definitions used to serialize the encrypter to the
+	// database.
+	//
+	// NOTE: A migration should be added whenever this list changes. This
+	// prevents against the database being rolled back to an older
+	// format where the surrounding logic might assume a different set of
+	// fields are known.
+	creationTimeType tlv.Type = 0
 )
+
+// AttrErrorStruct defines the message structure for an attributable error. Use
+// a maximum route length of 20, a fixed payload length of 4 bytes to
+// accommodate the a 32-bit hold time in milliseconds and use 4 byte hmacs.
+// Total size including a 256 byte message from the error source works out to
+// 1200 bytes.
+var AttrErrorStruct = sphinx.NewAttrErrorStructure(20, 4, 4)
+
+var byteOrder = binary.BigEndian
 
 // IsBlinded returns a boolean indicating whether the error encrypter belongs
 // to a blinded route.
 func (e EncrypterType) IsBlinded() bool {
 	return e == EncrypterTypeIntroduction || e == EncrypterTypeRelaying
 }
+
+// SharedSecretGenerator defines a function signature that extracts a shared
+// secret from an sphinx OnionPacket.
+type SharedSecretGenerator func(*btcec.PublicKey) (sphinx.Hash256,
+	lnwire.FailCode)
 
 // ErrorEncrypterExtracter defines a function signature that extracts an
 // ErrorEncrypter from an sphinx OnionPacket.
@@ -65,12 +92,12 @@ type ErrorEncrypter interface {
 	// message. This method is used when we receive an
 	// UpdateFailMalformedHTLC from the remote peer and then need to
 	// convert that into a proper error from only the raw bytes.
-	EncryptMalformedError(lnwire.OpaqueReason) lnwire.OpaqueReason
+	EncryptMalformedError(lnwire.OpaqueReason) (lnwire.OpaqueReason, error)
 
 	// IntermediateEncrypt wraps an already encrypted opaque reason error
 	// in an additional layer of onion encryption. This process repeats
 	// until the error arrives at the source of the payment.
-	IntermediateEncrypt(lnwire.OpaqueReason) lnwire.OpaqueReason
+	IntermediateEncrypt(lnwire.OpaqueReason) (lnwire.OpaqueReason, error)
 
 	// Type returns an enum indicating the underlying concrete instance
 	// backing this interface.
@@ -84,12 +111,13 @@ type ErrorEncrypter interface {
 	// given io.Reader.
 	Decode(io.Reader) error
 
-	// Reextract rederives the encrypter using the extracter, performing an
-	// ECDH with the sphinx router's key and the ephemeral public key.
+	// Reextract rederives the encrypter using the shared secret generator,
+	// performing an ECDH with the sphinx router's key and the ephemeral
+	// public key.
 	//
 	// NOTE: This should be called shortly after Decode to properly
 	// reinitialize the error encrypter.
-	Reextract(ErrorEncrypterExtracter) error
+	Reextract(SharedSecretGenerator) error
 }
 
 // SphinxErrorEncrypter is a concrete implementation of both the ErrorEncrypter
@@ -97,9 +125,26 @@ type ErrorEncrypter interface {
 // result, all errors handled are themselves wrapped in layers of onion
 // encryption and must be treated as such accordingly.
 type SphinxErrorEncrypter struct {
-	*sphinx.OnionErrorEncrypter
+	encrypter interface{}
 
 	EphemeralKey *btcec.PublicKey
+
+	CreatedAt time.Time
+
+	attrError bool
+}
+
+// NewSphinxErrorEncrypterUninitialized initializes a blank sphinx error
+// encrypter, that should be used to deserialize an encoded
+// SphinxErrorEncrypter. Since the actual encrypter is not stored in plaintext
+// while at rest, reconstructing the error encrypter requires:
+//  1. Decode: to deserialize the ephemeral public key.
+//  2. Reextract: to "unlock" the actual error encrypter using an active
+//     OnionProcessor.
+func NewSphinxErrorEncrypterUninitialized() *SphinxErrorEncrypter {
+	return &SphinxErrorEncrypter{
+		EphemeralKey: &btcec.PublicKey{},
+	}
 }
 
 // NewSphinxErrorEncrypter initializes a blank sphinx error encrypter, that
@@ -109,10 +154,59 @@ type SphinxErrorEncrypter struct {
 //  1. Decode: to deserialize the ephemeral public key.
 //  2. Reextract: to "unlock" the actual error encrypter using an active
 //     OnionProcessor.
-func NewSphinxErrorEncrypter() *SphinxErrorEncrypter {
-	return &SphinxErrorEncrypter{
-		OnionErrorEncrypter: nil,
-		EphemeralKey:        &btcec.PublicKey{},
+func NewSphinxErrorEncrypter(ephemeralKey *btcec.PublicKey,
+	sharedSecret sphinx.Hash256, attrError bool) *SphinxErrorEncrypter {
+
+	encrypter := &SphinxErrorEncrypter{
+		EphemeralKey: ephemeralKey,
+		attrError:    attrError,
+	}
+
+	encrypter.initialize(sharedSecret)
+
+	if attrError {
+		// Set creation time rounded to nanosecond to avoid differences
+		// after serialization.
+		encrypter.CreatedAt = time.Now().Truncate(time.Nanosecond)
+	}
+
+	return encrypter
+}
+
+func (s *SphinxErrorEncrypter) initialize(sharedSecret sphinx.Hash256) {
+	if s.attrError {
+		s.encrypter = sphinx.NewOnionAttrErrorEncrypter(
+			sharedSecret, AttrErrorStruct,
+		)
+	} else {
+		s.encrypter = sphinx.NewOnionErrorEncrypter(
+			sharedSecret,
+		)
+	}
+}
+
+func (s *SphinxErrorEncrypter) getHoldTimeMs() uint32 {
+	return uint32(time.Since(s.CreatedAt).Milliseconds())
+}
+
+func (s *SphinxErrorEncrypter) encrypt(initial bool,
+	data []byte) (lnwire.OpaqueReason, error) {
+
+	switch encrypter := s.encrypter.(type) {
+	case *sphinx.OnionErrorEncrypter:
+		return encrypter.EncryptError(initial, data), nil
+
+	case *sphinx.OnionAttrErrorEncrypter:
+		// Pass hold time as the payload.
+		holdTimeMs := s.getHoldTimeMs()
+
+		var payload [4]byte
+		byteOrder.PutUint32(payload[:], holdTimeMs)
+
+		return encrypter.EncryptError(initial, data, payload[:])
+
+	default:
+		panic("unexpected encrypter type")
 	}
 }
 
@@ -132,7 +226,7 @@ func (s *SphinxErrorEncrypter) EncryptFirstHop(
 
 	// We pass a true as the first parameter to indicate that a MAC should
 	// be added.
-	return s.EncryptError(true, b.Bytes()), nil
+	return s.encrypt(true, b.Bytes())
 }
 
 // EncryptMalformedError is similar to EncryptFirstHop (it adds the MAC), but
@@ -143,9 +237,9 @@ func (s *SphinxErrorEncrypter) EncryptFirstHop(
 //
 // NOTE: Part of the ErrorEncrypter interface.
 func (s *SphinxErrorEncrypter) EncryptMalformedError(
-	reason lnwire.OpaqueReason) lnwire.OpaqueReason {
+	reason lnwire.OpaqueReason) (lnwire.OpaqueReason, error) {
 
-	return s.EncryptError(true, reason)
+	return s.encrypt(true, reason)
 }
 
 // IntermediateEncrypt wraps an already encrypted opaque reason error in an
@@ -156,9 +250,26 @@ func (s *SphinxErrorEncrypter) EncryptMalformedError(
 //
 // NOTE: Part of the ErrorEncrypter interface.
 func (s *SphinxErrorEncrypter) IntermediateEncrypt(
-	reason lnwire.OpaqueReason) lnwire.OpaqueReason {
+	reason lnwire.OpaqueReason) (lnwire.OpaqueReason, error) {
 
-	return s.EncryptError(false, reason)
+	encrypted, err := s.encrypt(false, reason)
+	switch {
+	// If the structure of the error received from downstream is invalid,
+	// then generate a new failure message with a valid structure so that
+	// the sender is able to penalize the offending node.
+	case errors.Is(err, sphinx.ErrInvalidStructure):
+		// Use an all-zeroes failure message. This is not a defined
+		// message, but the sender will at least know where the error
+		// occurred.
+		reason = make([]byte, lnwire.FailureMessageLength+2+2)
+
+		return s.encrypt(true, reason)
+
+	case err != nil:
+		return lnwire.OpaqueReason{}, err
+	}
+
+	return encrypted, nil
 }
 
 // Type returns the identifier for a sphinx error encrypter.
@@ -171,7 +282,25 @@ func (s *SphinxErrorEncrypter) Type() EncrypterType {
 func (s *SphinxErrorEncrypter) Encode(w io.Writer) error {
 	ephemeral := s.EphemeralKey.SerializeCompressed()
 	_, err := w.Write(ephemeral)
-	return err
+	if err != nil {
+		return err
+	}
+
+	// Stop here for legacy errors.
+	if !s.attrError {
+		return nil
+	}
+
+	var creationTime = uint64(s.CreatedAt.UnixNano())
+
+	tlvStream, err := tlv.NewStream(
+		tlv.MakePrimitiveRecord(creationTimeType, &creationTime),
+	)
+	if err != nil {
+		return err
+	}
+
+	return tlvStream.Encode(w)
 }
 
 // Decode reconstructs the error encrypter's ephemeral public key from the
@@ -188,6 +317,30 @@ func (s *SphinxErrorEncrypter) Decode(r io.Reader) error {
 		return err
 	}
 
+	// Try decode attributable error structure.
+	var creationTime uint64
+
+	tlvStream, err := tlv.NewStream(
+		tlv.MakePrimitiveRecord(creationTimeType, &creationTime),
+	)
+	if err != nil {
+		return err
+	}
+
+	typeMap, err := tlvStream.DecodeWithParsedTypes(r)
+	if err != nil {
+		return err
+	}
+
+	// Return early if this encrypter is not for attributable errors.
+	if len(typeMap) == 0 {
+		return nil
+	}
+
+	// Set attributable error flag and creation time.
+	s.attrError = true
+	s.CreatedAt = time.Unix(0, int64(creationTime))
+
 	return nil
 }
 
@@ -195,9 +348,9 @@ func (s *SphinxErrorEncrypter) Decode(r io.Reader) error {
 // This intended to be used shortly after Decode, to fully initialize a
 // SphinxErrorEncrypter.
 func (s *SphinxErrorEncrypter) Reextract(
-	extract ErrorEncrypterExtracter) error {
+	extract SharedSecretGenerator) error {
 
-	obfuscator, failcode := extract(s.EphemeralKey)
+	sharedSecret, failcode := extract(s.EphemeralKey)
 	if failcode != lnwire.CodeNone {
 		// This should never happen, since we already validated that
 		// this obfuscator can be extracted when it was received in the
@@ -206,13 +359,7 @@ func (s *SphinxErrorEncrypter) Reextract(
 			"obfuscator, got failcode: %d", failcode)
 	}
 
-	sphinxEncrypter, ok := obfuscator.(*SphinxErrorEncrypter)
-	if !ok {
-		return fmt.Errorf("incorrect onion error extracter")
-	}
-
-	// Copy the freshly extracted encrypter.
-	s.OnionErrorEncrypter = sphinxEncrypter.OnionErrorEncrypter
+	s.initialize(sharedSecret)
 
 	return nil
 }
@@ -249,7 +396,7 @@ func (i *IntroductionErrorEncrypter) Type() EncrypterType {
 // Reextract rederives the error encrypter from the currently held EphemeralKey,
 // relying on the logic in the underlying SphinxErrorEncrypter.
 func (i *IntroductionErrorEncrypter) Reextract(
-	extract ErrorEncrypterExtracter) error {
+	extract SharedSecretGenerator) error {
 
 	return i.ErrorEncrypter.Reextract(extract)
 }
@@ -280,7 +427,7 @@ func (r *RelayingErrorEncrypter) Type() EncrypterType {
 // Reextract rederives the error encrypter from the currently held EphemeralKey,
 // relying on the logic in the underlying SphinxErrorEncrypter.
 func (r *RelayingErrorEncrypter) Reextract(
-	extract ErrorEncrypterExtracter) error {
+	extract SharedSecretGenerator) error {
 
 	return r.ErrorEncrypter.Reextract(extract)
 }

@@ -1944,6 +1944,7 @@ func (l *channelLink) handleDownstreamPkt(ctx context.Context,
 			htlc.ID,
 			pkt.obfuscator,
 			htlc.Reason,
+			htlc.ExtraData,
 		); err != nil {
 			l.log.Errorf("unable to send HTLC failure: %v",
 				err)
@@ -1972,6 +1973,20 @@ func (l *channelLink) handleDownstreamPkt(ctx context.Context,
 		// Immediately update the commitment tx to minimize latency.
 		l.updateCommitTxOrFail(ctx)
 	}
+}
+
+func (l *channelLink) LookUpRemoteAddTimeByHTLCIndex(i uint64) time.Time {
+	l.Lock()
+	defer l.Unlock()
+
+	return l.channel.LookUpHtlcByIndex(i).AddTime
+}
+
+func (l *channelLink) LookUpLocalAddTimeByHTLCIndex(i uint64) time.Time {
+	l.Lock()
+	defer l.Unlock()
+
+	return l.channel.LookUpHtlcByIndex(i).AddTime
 }
 
 // tryBatchUpdateCommitTx updates the commitment transaction if the batch is
@@ -2253,7 +2268,7 @@ func (l *channelLink) handleUpstreamMsg(ctx context.Context,
 		// If remote side have been unable to parse the onion blob we
 		// have sent to it, than we should transform the malformed HTLC
 		// message to the usual HTLC fail message.
-		err := l.channel.ReceiveFailHTLC(msg.ID, b.Bytes())
+		err := l.channel.ReceiveFailHTLC(msg.ID, b.Bytes(), msg.ExtraData)
 		if err != nil {
 			l.failf(LinkFailureError{code: ErrInvalidUpdate},
 				"unable to handle upstream fail HTLC: %v", err)
@@ -2291,7 +2306,7 @@ func (l *channelLink) handleUpstreamMsg(ctx context.Context,
 
 		// Add fail to the update log.
 		idx := msg.ID
-		err := l.channel.ReceiveFailHTLC(idx, msg.Reason[:])
+		err := l.channel.ReceiveFailHTLC(idx, msg.Reason[:], msg.ExtraData)
 		if err != nil {
 			l.failf(LinkFailureError{code: ErrInvalidUpdate},
 				"unable to handle upstream fail HTLC: %v", err)
@@ -4339,16 +4354,23 @@ func (l *channelLink) sendHTLCError(add lnwire.UpdateAddHTLC,
 		return
 	}
 
+	// TODO(george): default to attr-failures encryptor above
+
+	// TODO(george): return hold time directly from FailHTLC
 	err = l.channel.FailHTLC(add.ID, reason, &sourceRef, nil, nil)
 	if err != nil {
 		l.log.Errorf("unable cancel htlc: %v", err)
 		return
 	}
 
+	pd := l.channel.LookUpHtlcByIndex(add.ID)
+	hold := time.Since(pd.AddTime)
+	fmt.Printf("### source of error - sendHTLCError (set {0}), hold=%v\n", hold)
+
 	// Send the appropriate failure message depending on whether we're
 	// in a blinded route or not.
 	if err := l.sendIncomingHTLCFailureMsg(
-		add.ID, e, reason,
+		add.ID, e, reason, []byte{0},
 	); err != nil {
 		l.log.Errorf("unable to send HTLC failure: %v", err)
 		return
@@ -4393,7 +4415,8 @@ func (l *channelLink) sendHTLCError(add lnwire.UpdateAddHTLC,
 // we're the failing party.
 func (l *channelLink) sendIncomingHTLCFailureMsg(htlcIndex uint64,
 	e hop.ErrorEncrypter,
-	originalFailure lnwire.OpaqueReason) error {
+	originalFailure lnwire.OpaqueReason,
+	extraData lnwire.ExtraOpaqueData) error {
 
 	var msg lnwire.Message
 	switch {
@@ -4418,10 +4441,13 @@ func (l *channelLink) sendIncomingHTLCFailureMsg(htlcIndex uint64,
 	// For cleartext hops (ie, non-blinded/normal) we don't need any
 	// transformation on the error message and can just send the original.
 	case !e.Type().IsBlinded():
+		newData := append(extraData, 1)
+
 		msg = &lnwire.UpdateFailHTLC{
-			ChanID: l.ChanID(),
-			ID:     htlcIndex,
-			Reason: originalFailure,
+			ChanID:    l.ChanID(),
+			ID:        htlcIndex,
+			Reason:    originalFailure,
+			ExtraData: newData,
 		}
 
 	// When we're the introduction node, we need to convert the error to

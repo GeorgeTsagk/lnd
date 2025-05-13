@@ -2,6 +2,7 @@ package htlcswitch
 
 import (
 	"context"
+	"time"
 
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/wire"
@@ -172,6 +173,10 @@ type ChannelUpdateHandler interface {
 	// argument's LinkDirection, then we will call this hook immediately.
 	OnCommitOnce(LinkDirection, func())
 
+	LookUpRemoteAddTimeByHTLCIndex(i uint64) time.Time
+
+	LookUpLocalAddTimeByHTLCIndex(i uint64) time.Time
+
 	// InitStfu allows us to initiate quiescence on this link. It returns
 	// a receive only channel that will block until quiescence has been
 	// achieved, or definitively fails. The return value is the
@@ -326,6 +331,8 @@ type ChannelLink interface {
 	AuxBandwidth(amount lnwire.MilliSatoshi, cid lnwire.ShortChannelID,
 		htlcBlob fn.Option[tlv.Blob],
 		ts AuxTrafficShaper) fn.Result[OptionalBandwidth]
+
+	LookUpRemoteAddTimeByHTLCIndex(uint64) time.Time
 
 	// Start starts the channel link.
 	Start() error

@@ -2,7 +2,9 @@ package lnwire
 
 import (
 	"bytes"
+	"fmt"
 	"io"
+	"runtime"
 )
 
 // OpaqueReason is an opaque encrypted byte slice that encodes the exact
@@ -73,6 +75,25 @@ func (c *UpdateFailHTLC) Encode(w *bytes.Buffer, pver uint32) error {
 	}
 
 	return WriteBytes(w, c.ExtraData)
+}
+
+func PrettyPrintStack() {
+	const depth = 8 // 1 for PrettyPrintStack, 7 for actual callers
+	pcs := make([]uintptr, depth)
+	n := runtime.Callers(2, pcs) // skip 2 to exclude runtime.Callers and PrettyPrintStack itself
+
+	frames := runtime.CallersFrames(pcs[:n])
+	fmt.Println("###Call stack:")
+
+	i := 0
+	for {
+		frame, more := frames.Next()
+		fmt.Printf("###  #%d %s\n###      %s:%d\n", i+1, frame.Function, frame.File, frame.Line)
+		i++
+		if !more || i >= 7 {
+			break
+		}
+	}
 }
 
 // MsgType returns the integer uniquely identifying this message type on the

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"slices"
 	"sync"
+	"time"
 
 	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/btcec/v2"
@@ -6068,6 +6069,7 @@ func (lc *LightningChannel) htlcAddDescriptor(htlc *lnwire.UpdateAddHTLC,
 		OpenCircuitKey: openKey,
 		BlindingPoint:  htlc.BlindingPoint,
 		CustomRecords:  htlc.CustomRecords.Copy(),
+		AddTime:        time.Now(),
 	}
 }
 
@@ -6131,6 +6133,7 @@ func (lc *LightningChannel) ReceiveHTLC(htlc *lnwire.UpdateAddHTLC) (uint64,
 		OnionBlob:     htlc.OnionBlob,
 		BlindingPoint: htlc.BlindingPoint,
 		CustomRecords: htlc.CustomRecords.Copy(),
+		AddTime:       time.Now(),
 	}
 
 	localACKedIndex := lc.commitChains.Remote.tail().messageIndices.Local
@@ -6320,6 +6323,7 @@ func (lc *LightningChannel) FailHTLC(htlcIndex uint64, reason []byte,
 		SourceRef:        sourceRef,
 		DestRef:          destRef,
 		ClosedCircuitKey: closeKey,
+		FailExtraData:    htlc.FailExtraData,
 	}
 
 	lc.updateLogs.Local.appendUpdate(pd)
@@ -6387,7 +6391,7 @@ func (lc *LightningChannel) MalformedFailHTLC(htlcIndex uint64,
 // commitment update. This method should be called in response to the upstream
 // party cancelling an outgoing HTLC.
 func (lc *LightningChannel) ReceiveFailHTLC(htlcIndex uint64, reason []byte,
-) error {
+	extraData lnwire.ExtraOpaqueData) error {
 
 	lc.Lock()
 	defer lc.Unlock()
@@ -6404,13 +6408,14 @@ func (lc *LightningChannel) ReceiveFailHTLC(htlcIndex uint64, reason []byte,
 	}
 
 	pd := &paymentDescriptor{
-		ChanID:      lc.ChannelID(),
-		Amount:      htlc.Amount,
-		RHash:       htlc.RHash,
-		ParentIndex: htlc.HtlcIndex,
-		LogIndex:    lc.updateLogs.Remote.logIndex,
-		EntryType:   Fail,
-		FailReason:  reason,
+		ChanID:        lc.ChannelID(),
+		Amount:        htlc.Amount,
+		RHash:         htlc.RHash,
+		ParentIndex:   htlc.HtlcIndex,
+		LogIndex:      lc.updateLogs.Remote.logIndex,
+		EntryType:     Fail,
+		FailReason:    reason,
+		FailExtraData: extraData,
 	}
 
 	lc.updateLogs.Remote.appendUpdate(pd)
@@ -9744,6 +9749,18 @@ func (lc *LightningChannel) ActiveHtlcs() []channeldb.HTLC {
 	defer lc.RUnlock()
 
 	return lc.channelState.ActiveHtlcs()
+}
+
+func (lc *LightningChannel) LookUpHtlcByIndex(i uint64) *paymentDescriptor {
+	lc.Lock()
+	defer lc.Unlock()
+
+	res := lc.updateLogs.Local.lookupHtlc(i)
+	if res != nil {
+		return res
+	}
+
+	return lc.updateLogs.Remote.lookupHtlc(i)
 }
 
 // LocalChanReserve returns our local ChanReserve requirement for the remote party.

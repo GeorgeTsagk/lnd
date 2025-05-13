@@ -718,6 +718,7 @@ func (m *memoryMailBox) FailAdd(pkt *htlcPacket) {
 		reason = lnwire.OpaqueReason(b.Bytes())
 		localFailure = true
 	} else {
+		// TODO(george): check !ok here?
 		// If the packet is part of a forward, (identified by a non-nil
 		// obfuscator) we need to encrypt the error back to the source.
 		var err error
@@ -734,6 +735,9 @@ func (m *memoryMailBox) FailAdd(pkt *htlcPacket) {
 		failure, OutgoingFailureDownstreamHtlcAdd,
 	)
 
+	htlcFail, _ := pkt.htlc.(*lnwire.UpdateFailHTLC)
+	// TODO(george): check !ok here?
+
 	failPkt := &htlcPacket{
 		incomingChanID: pkt.incomingChanID,
 		incomingHTLCID: pkt.incomingHTLCID,
@@ -744,7 +748,8 @@ func (m *memoryMailBox) FailAdd(pkt *htlcPacket) {
 		obfuscator:     pkt.obfuscator,
 		linkFailure:    linkError,
 		htlc: &lnwire.UpdateFailHTLC{
-			Reason: reason,
+			Reason:    reason,
+			ExtraData: htlcFail.ExtraData,
 		},
 	}
 

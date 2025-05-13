@@ -738,7 +738,10 @@ func (f *interceptedForward) ResumeModified(
 // Fail notifies the intention to Fail an existing hold forward with an
 // encrypted failure reason.
 func (f *interceptedForward) Fail(reason []byte) error {
-	obfuscatedReason := f.packet.obfuscator.IntermediateEncrypt(reason)
+	obfuscatedReason, err := f.packet.obfuscator.IntermediateEncrypt(reason)
+	if err != nil {
+		return err
+	}
 
 	return f.resolve(&lnwire.UpdateFailHTLC{
 		Reason: obfuscatedReason,
@@ -804,6 +807,7 @@ func (f *interceptedForward) FailWithCode(code lnwire.FailCode) error {
 
 	// Encrypt the failure for the first hop. This node will be the origin
 	// of the failure.
+	// TODO(george): use new encrypter, make use of fail extraData.
 	reason, err := f.packet.obfuscator.EncryptFirstHop(failureMsg)
 	if err != nil {
 		return fmt.Errorf("failed to encrypt failure reason %w", err)
