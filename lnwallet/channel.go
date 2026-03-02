@@ -2121,7 +2121,10 @@ func NewBreachRetribution(chanState *channeldb.OpenChannel, stateNum uint64,
 
 	auxResult, err := fn.MapOptionZ(
 		leafStore, func(s AuxLeafStore) fn.Result[CommitDiffAuxResult] {
-			return s.FetchLeavesFromRevocation(revokedLog)
+			return s.FetchLeavesFromRevocation(
+				revokedLog, NewAuxChanState(chanState),
+				*keyRing, spendTx,
+			)
 		},
 	).Unpack()
 	if err != nil {
