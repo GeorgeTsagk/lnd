@@ -1490,7 +1490,9 @@ func genSuccessTx(t *testing.T, chanType channeldb.ChannelType) *wire.MsgTx {
 		},
 	}
 
-	sigHashType := lnwallet.HtlcSigHashType(channeldb.SingleFunderBit)
+	sigHashType := lnwallet.HtlcSigHashType(
+		channeldb.SingleFunderBit,
+	)
 
 	var successWitness [][]byte
 
