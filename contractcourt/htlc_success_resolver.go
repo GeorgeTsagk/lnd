@@ -402,6 +402,39 @@ func (h *htlcSuccessResolver) isZeroFeeOutput() bool {
 		h.htlcResolution.SignDetails != nil
 }
 
+// isSigHashDefault returns true when the second-level HTLC transaction was
+// signed with SigHashDefault. In this case the pre-signed transaction has
+// baked-in fees and must be broadcast as-is — the sweeper cannot add wallet
+// inputs or change outputs without invalidating the peer's signature.
+//
+// NOTE: This only applies to taproot-assets (custom channel) HTLCs, so we
+// also require a resolution blob to be present (which is only set for aux
+// channels). This prevents accidental activation for regular lnd channels
+// where the zero-value SigHashType (0x00) would otherwise match.
+func (h *htlcSuccessResolver) isSigHashDefault() bool {
+	sd := h.htlcResolution.SignDetails
+
+	return sd != nil &&
+		sd.SigHashType == txscript.SigHashDefault &&
+		h.htlcResolution.ResolutionBlob.IsSome()
+}
+
+// publishSuccessTx directly broadcasts the pre-signed second-level HTLC
+// success transaction. This is used when the transaction was signed with
+// SigHashDefault (baked-in fees), where the sweeper's normal tx-rebuilding
+// flow would invalidate the peer's signature.
+func (h *htlcSuccessResolver) publishSuccessTx() error {
+	h.log.Infof("publishing pre-signed 2nd-level HTLC success tx=%v "+
+		"(SigHashDefault, baked-in fees)",
+		h.htlcResolution.SignedSuccessTx.TxHash())
+
+	label := labels.MakeLabel(
+		labels.LabelTypeChannelClose, &h.ShortChanID,
+	)
+
+	return h.PublishTx(h.htlcResolution.SignedSuccessTx, label)
+}
+
 // isTaproot returns true if the resolver is for a taproot output.
 func (h *htlcSuccessResolver) isTaproot() bool {
 	return txscript.IsPayToTaproot(
@@ -757,6 +790,14 @@ func (h *htlcSuccessResolver) Launch() error {
 		// can go ahead and sweep its output.
 		if h.outputIncubating {
 			return h.sweepSuccessTxOutput()
+		}
+
+		// When the peer signed with SigHashDefault the pre-signed
+		// second-level tx has baked-in fees and cannot be modified
+		// (adding wallet inputs would invalidate the signature).
+		// Publish it directly instead of going through the sweeper.
+		if h.isSigHashDefault() {
+			return h.publishSuccessTx()
 		}
 
 		// Otherwise, sweep the second level tx.
