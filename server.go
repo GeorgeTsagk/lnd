@@ -1737,6 +1737,7 @@ func newServer(ctx context.Context, cfg *Config, listenAddrs []net.Addr,
 				channel, commitHeight, 0, nil,
 				implCfg.AuxLeafStore,
 				implCfg.AuxContractResolver,
+				implCfg.AuxSigner,
 			)
 			if err != nil {
 				return nil, 0, err

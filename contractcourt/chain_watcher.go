@@ -1076,6 +1076,7 @@ func (c *chainWatcher) handlePossibleBreach(commitSpend *chainntnfs.SpendDetail,
 	retribution, err := lnwallet.NewBreachRetribution(
 		c.cfg.chanState, broadcastStateNum, spendHeight,
 		commitSpend.SpendingTx, c.cfg.auxLeafStore, c.cfg.auxResolver,
+		c.cfg.auxSigner,
 	)
 
 	switch {
