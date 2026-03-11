@@ -731,7 +731,7 @@ func (m *memoryMailBox) FailAdd(pkt *htlcPacket) {
 
 	extraData, err := lnwire.AttrDataToExtraData(attrData)
 	if err != nil {
-		log.Errorf("Failed to convert attr data: %w", err)
+		log.Errorf("Failed to convert attr data: %v", err)
 	}
 
 	// Create a link error containing the temporary channel failure and a
