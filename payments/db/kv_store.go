@@ -2071,7 +2071,24 @@ func serializeHTLCFailInfo(w io.Writer, f *HTLCFailInfo) error {
 		return err
 	}
 
-	return WriteElements(w, byte(f.Reason), f.FailureSourceIndex)
+	if err := WriteElements(w, byte(f.Reason), f.FailureSourceIndex); err != nil {
+		return err
+	}
+
+	// Write hold times count followed by each value. This is appended
+	// after the original fields for backward compatibility — old readers
+	// will simply stop reading at the end of FailureSourceIndex.
+	numHoldTimes := uint16(len(f.HoldTimes))
+	if err := WriteElements(w, numHoldTimes); err != nil {
+		return err
+	}
+	for _, ht := range f.HoldTimes {
+		if err := WriteElements(w, ht); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 // deserializeHTLCFailInfo deserializes the details of a failed htlc including
@@ -2116,6 +2133,27 @@ func deserializeHTLCFailInfo(r io.Reader) (*HTLCFailInfo, error) {
 		return nil, err
 	}
 	f.Reason = HTLCFailReason(reason)
+
+	// Read hold times if present. Old data won't have this field, so we
+	// treat EOF as "no hold times".
+	var numHoldTimes uint16
+	if err := ReadElements(r, &numHoldTimes); err != nil {
+		// If there's no more data, this is old format — return
+		// without hold times.
+		if err == io.EOF || err == io.ErrUnexpectedEOF {
+			return f, nil
+		}
+
+		return nil, err
+	}
+	if numHoldTimes > 0 {
+		f.HoldTimes = make([]uint32, numHoldTimes)
+		for i := range f.HoldTimes {
+			if err := ReadElements(r, &f.HoldTimes[i]); err != nil {
+				return nil, err
+			}
+		}
+	}
 
 	return f, nil
 }
