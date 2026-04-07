@@ -851,9 +851,19 @@ func (b *BreachArbitrator) notifyConfirmedJusticeTx(spends []spend,
 	historicJusticeTxs map[chainhash.Hash]*justiceTxCtx,
 	notifiedTxs map[chainhash.Hash]bool) {
 
+	brarLog.Debugf("notifyConfirmedJusticeTx: checking %d spends "+
+		"against %d historic justice txs",
+		len(spends), len(historicJusticeTxs))
+	for h := range historicJusticeTxs {
+		brarLog.Debugf("  historicJusticeTx: %v", h)
+	}
+
 	// Check each spend to see if it's from one of our justice txs.
 	for _, s := range spends {
 		spendingTxHash := *s.detail.SpenderTxHash
+
+		brarLog.Debugf("notifyConfirmedJusticeTx: spend %d "+
+			"spenderTxHash=%v", s.index, spendingTxHash)
 
 		// Skip if we've already notified about this transaction.
 		if notifiedTxs[spendingTxHash] {
@@ -899,10 +909,27 @@ func (b *BreachArbitrator) notifyConfirmedJusticeTx(spends []spend,
 		// justiceTxs has been replaced with newer variants.
 		if justiceCtx == nil {
 			justiceCtx = historicJusticeTxs[spendingTxHash]
+			if justiceCtx != nil {
+				brarLog.Debugf("notifyConfirmedJusticeTx: "+
+					"matched spend %d via historicJusticeTxs",
+					s.index)
+			}
+		}
+
+		if justiceCtx == nil {
+			brarLog.Debugf("notifyConfirmedJusticeTx: "+
+				"spend %d spenderTxHash=%v NOT MATCHED",
+				s.index, spendingTxHash)
 		}
 
 		// If this is one of our justice txs, notify the aux sweeper.
 		if justiceCtx != nil {
+			brarLog.Infof("notifyConfirmedJusticeTx: MATCHED "+
+				"spend %d, hasAuxSweeper=%v, calling "+
+				"NotifyBroadcast for tx %v",
+				s.index, b.cfg.AuxSweeper.IsSome(),
+				spendingTxHash)
+
 			bumpReq := sweep.BumpRequest{
 				Inputs:          justiceCtx.inputs,
 				DeliveryAddress: justiceCtx.sweepAddr,
@@ -919,8 +946,10 @@ func (b *BreachArbitrator) notifyConfirmedJusticeTx(spends []spend,
 						&bumpReq, s.detail.SpendingTx,
 						justiceCtx.fee, nil,
 						sweep.AuxNotifyOpts{
-							SkipBroadcast:   true,
-							SkipProofVerify: true,
+							SkipBroadcast: true,
+							ConfirmHeight: uint32(
+								s.detail.SpendingHeight,
+							),
 						},
 					)
 				},

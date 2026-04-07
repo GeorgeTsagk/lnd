@@ -89,6 +89,15 @@ type AuxNotifyOpts struct {
 	// outputs) that cannot pass VM-level validation, and the
 	// on-chain confirmation serves as proof of validity instead.
 	SkipProofVerify bool
+
+	// ConfirmHeight is an optional confirmation height hint for the
+	// transaction. When set, the porter uses this as the height hint
+	// when scanning for the on-chain confirmation instead of the
+	// current chain tip. This is critical for breach justice sweeps
+	// where NotifyBroadcast is called after the tx has already been
+	// confirmed and the chain has advanced past the confirmation
+	// block.
+	ConfirmHeight uint32
 }
 
 // AuxSweeper is used to enable a 3rd party to further shape the sweeping
