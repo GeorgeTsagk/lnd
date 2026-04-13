@@ -845,7 +845,7 @@ func updateBreachInfo(breachInfo *retributionInfo, spends []spend,
 // notifyConfirmedJusticeTx checks if any of the spend details match one of our
 // justice transactions. If a confirmed justice transaction is detected and we
 // haven't already notified about it, we call NotifyBroadcast on the aux sweeper
-// to generate asset-level proofs.
+// to generate aux-level proofs.
 func (b *BreachArbitrator) notifyConfirmedJusticeTx(spends []spend,
 	justiceTxs *justiceTxVariants,
 	historicJusticeTxs map[chainhash.Hash]*justiceTxCtx,
@@ -915,12 +915,14 @@ func (b *BreachArbitrator) notifyConfirmedJusticeTx(spends []spend,
 					// The tx is already confirmed, so
 					// skip broadcast and proof verify
 					// (placeholder witnesses).
+					h := uint32(s.detail.SpendingHeight)
 					return aux.NotifyBroadcast(
 						&bumpReq, s.detail.SpendingTx,
 						justiceCtx.fee, nil,
 						sweep.AuxNotifyOpts{
 							SkipBroadcast:   true,
 							SkipProofVerify: true,
+							ConfirmHeight:   h,
 						},
 					)
 				},
