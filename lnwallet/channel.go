@@ -2007,6 +2007,12 @@ type HtlcRetribution struct {
 	// ResolutionBlob is a blob used for aux channels that permits a
 	// spender of this output to claim all funds.
 	ResolutionBlob fn.Option[tlv.Blob]
+
+	// ResolveReq is the resolution request template used to generate
+	// the ResolutionBlob. It is preserved so the breach arbiter can
+	// re-resolve with a different witness type when an HTLC is taken
+	// to the second level.
+	ResolveReq *ResolutionReq
 }
 
 // BreachRetribution contains all the data necessary to bring a channel
@@ -2533,6 +2539,7 @@ func createHtlcRetribution(chanState *channeldb.OpenChannel,
 	// Only taproot channels can be modified by aux channels, so we
 	// only need to resolve the aux blob for taproot channel types.
 	var resolutionBlob fn.Option[tlv.Blob]
+	var savedResolveReq *ResolutionReq
 	if isTaproot {
 		htlcIDOpt := fn.MapOption(
 			func(v tlv.BigSizeT[uint64]) input.HtlcIndex {
@@ -2555,6 +2562,7 @@ func createHtlcRetribution(chanState *channeldb.OpenChannel,
 			KeyRing:             keyRing,
 			CsvDelay:            theirDelay,
 			CommitFee:           cs.RemoteCommitment.CommitFee,
+			HtlcAmt:             htlc.Amt.Val.Int(),
 			PayHash: fn.Some(
 				[32]byte(htlc.RHash.Val),
 			),
@@ -2577,6 +2585,15 @@ func createHtlcRetribution(chanState *channeldb.OpenChannel,
 		}
 
 		resolutionBlob = resolveBlob.OkToSome()
+
+		// Save the resolve request template so the breach arbiter
+		// can re-resolve when an HTLC is taken to second level.
+		// We deep-copy the key ring to prevent any potential
+		// mutation from affecting the saved request.
+		keyRingCopy := *keyRing
+		resolveReqCopy := resolveReq
+		resolveReqCopy.KeyRing = &keyRingCopy
+		savedResolveReq = &resolveReqCopy
 	}
 
 	return HtlcRetribution{
@@ -2589,6 +2606,7 @@ func createHtlcRetribution(chanState *channeldb.OpenChannel,
 		IsIncoming:               htlc.Incoming.Val,
 		SecondLevelTapTweak:      secondLevelTapTweak,
 		ResolutionBlob:           resolutionBlob,
+		ResolveReq:               savedResolveReq,
 	}, nil
 }
 
