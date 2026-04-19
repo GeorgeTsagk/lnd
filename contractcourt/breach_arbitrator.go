@@ -845,11 +845,12 @@ func updateBreachInfo(breachInfo *retributionInfo, spends []spend,
 // notifyConfirmedJusticeTx checks if any of the spend details match one of our
 // justice transactions. If a confirmed justice transaction is detected and we
 // haven't already notified about it, we call NotifyBroadcast on the aux sweeper
-// to generate asset-level proofs.
+// to generate aux-level proofs.
 func (b *BreachArbitrator) notifyConfirmedJusticeTx(spends []spend,
 	justiceTxs *justiceTxVariants,
 	historicJusticeTxs map[chainhash.Hash]*justiceTxCtx,
-	notifiedTxs map[chainhash.Hash]bool) {
+	notifiedTxs map[chainhash.Hash]bool,
+	breachedOutputs []breachedOutput) {
 
 	// Check each spend to see if it's from one of our justice txs.
 	for _, s := range spends {
@@ -871,22 +872,29 @@ func (b *BreachArbitrator) notifyConfirmedJusticeTx(spends []spend,
 		}
 
 		var justiceCtx *justiceTxCtx
+		var matchSource string
 		switch {
 		case matchesJusticeTx(justiceTxs.spendAll):
 			justiceCtx = justiceTxs.spendAll
+			matchSource = "spendAll"
 
 		case matchesJusticeTx(justiceTxs.spendCommitOuts):
 			justiceCtx = justiceTxs.spendCommitOuts
+			matchSource = "spendCommitOuts"
 
 		case matchesJusticeTx(justiceTxs.spendHTLCs):
 			justiceCtx = justiceTxs.spendHTLCs
+			matchSource = "spendHTLCs"
 		}
 
 		// Also check the individual second-level sweeps.
 		if justiceCtx == nil {
-			for _, tx := range justiceTxs.spendSecondLevelHTLCs {
+			for i, tx := range justiceTxs.spendSecondLevelHTLCs {
 				if matchesJusticeTx(tx) {
 					justiceCtx = tx
+					matchSource = fmt.Sprintf(
+						"secondLevel[%d]", i,
+					)
 
 					break
 				}
@@ -899,12 +907,13 @@ func (b *BreachArbitrator) notifyConfirmedJusticeTx(spends []spend,
 		// justiceTxs has been replaced with newer variants.
 		if justiceCtx == nil {
 			justiceCtx = historicJusticeTxs[spendingTxHash]
+			if justiceCtx != nil {
+				matchSource = "historic"
+			}
 		}
 
 		// If this is one of our justice txs, notify the aux sweeper.
 		if justiceCtx != nil {
-<<<<<<< HEAD
-=======
 			brarLog.Infof("[NOTIFY-JUSTICE] matched spend "+
 				"txid=%v to justice tx via %s "+
 				"(numInputs=%d), notifying aux sweeper",
@@ -969,9 +978,8 @@ func (b *BreachArbitrator) notifyConfirmedJusticeTx(spends []spend,
 				"(hasSecondLevel=%v)",
 				len(freshInputs), hasSecondLevel)
 
->>>>>>> 8176a3070 (contractcourt: retain second-level metadata for justice txs)
 			bumpReq := sweep.BumpRequest{
-				Inputs:          justiceCtx.inputs,
+				Inputs:          freshInputs,
 				DeliveryAddress: justiceCtx.sweepAddr,
 				ExtraTxOut:      justiceCtx.extraTxOut,
 			}
@@ -980,14 +988,17 @@ func (b *BreachArbitrator) notifyConfirmedJusticeTx(spends []spend,
 				b.cfg.AuxSweeper,
 				func(aux sweep.AuxSweeper) error {
 					// The tx is already confirmed, so
-					// skip broadcast and proof verify
-					// (placeholder witnesses).
+					// skip broadcast. Proof verification
+					// must run to ensure valid anchor
+					// metadata for spending.
+					h := uint32(s.detail.SpendingHeight)
 					return aux.NotifyBroadcast(
 						&bumpReq, s.detail.SpendingTx,
 						justiceCtx.fee, nil,
 						sweep.AuxNotifyOpts{
-							SkipBroadcast:   true,
-							SkipProofVerify: true,
+							SkipBroadcast:     true,
+							ConfirmHeight:     h,
+							LookupInputProofs: hasSecondLevel, //nolint:ll
 						},
 					)
 				},
@@ -1118,15 +1129,13 @@ justiceTxBroadcast:
 	recordJusticeTxVariants(justiceTxs, historicJusticeTxs)
 	finalTx := justiceTxs.spendAll
 
-	brarLog.Debugf("Broadcasting justice tx: %v", lnutils.SpewLogClosure(
-		finalTx))
-
 	// We'll now attempt to broadcast the transaction which finalized the
 	// channel's retribution against the cheating counter party.
 	label := labels.MakeLabel(labels.LabelTypeJusticeTransaction, nil)
 	err = b.cfg.PublishTransaction(finalTx.justiceTx, label)
 	if err != nil {
-		brarLog.Errorf("Unable to broadcast justice tx: %v", err)
+		brarLog.Errorf("Unable to broadcast initial spendAll "+
+			"justice tx: %v", err)
 	}
 
 	// Regardless of publication succeeded or not, we now wait for any of
@@ -1172,12 +1181,14 @@ Loop:
 				spends, justiceTxs,
 				historicJusticeTxs,
 				notifiedJusticeTxs,
+				breachInfo.breachedOutputs,
 			)
 
 			// Update the breach info with the new spends.
 			t, r := updateBreachInfo(
 				breachInfo, spends, b.cfg.AuxResolver,
 			)
+
 			totalFunds += t
 			revokedFunds += r
 
@@ -1255,24 +1266,19 @@ Loop:
 				justiceTxs, historicJusticeTxs,
 			)
 
-			// Re-attempt the spendAll variant first, in
-			// case the breach info was updated since the
-			// initial broadcast. This avoids splitting into
-			// small txs that can't pay fees when a combined
-			// tx would work.
+			// Re-attempt the spendAll variant first.
 			if justiceTxs.spendAll != nil {
+				sa := justiceTxs.spendAll
 				label := labels.MakeLabel(
 					labels.LabelTypeJusticeTransaction,
 					nil,
 				)
 				err = b.cfg.PublishTransaction(
-					justiceTxs.spendAll.justiceTx,
-					label,
+					sa.justiceTx, label,
 				)
 				if err != nil {
-					brarLog.Warnf("Unable to "+
-						"broadcast updated "+
-						"spendAll justice "+
+					brarLog.Warnf("Unable to broadcast "+
+						"rebuild spendAll justice "+
 						"tx: %v", err)
 				}
 			}
