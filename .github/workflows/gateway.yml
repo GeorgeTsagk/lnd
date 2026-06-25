@@ -35,7 +35,7 @@ jobs:
           # Pin the private runtime to an immutable commit (matches the action
           # SHA-pin above) so runtime upgrades go through an lnd PR, not a moved
           # tag. Without this, runtime_ref defaults to the v0.4.3 tag.
-          runtime_ref: bb11d9744cd6fe7fbeeb9de720fc8a74b5232a8e # gateway v0.4.3
+          runtime_ref: 2f08c1d142c73cebf64d9cf47334dfed0fd86935 # gateway resolve-installation-id (test)
           event_name:      ${{ github.event_name }}
           event_action:    ${{ github.event.action }}
           repo:            ${{ github.repository }}
@@ -43,7 +43,8 @@ jobs:
           actor:           ${{ github.event.sender.login }}
           comment_body:    ${{ github.event.comment.body }}
           comment_id:      ${{ github.event.comment.id }}
-          installation_id: 140960039
+          # installation_id intentionally omitted: the runtime resolves the
+          # App installation for this repo from app_id/private_key.
           app_id:                  ${{ secrets.GATEWAY_APP_ID }}
           private_key:             ${{ secrets.GATEWAY_PRIVATE_KEY }}
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
