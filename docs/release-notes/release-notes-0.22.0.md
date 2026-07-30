@@ -42,6 +42,19 @@
   regardless of peer connectivity. Uptime is now seeded from the peer's
   actual connection state.
 
+* [Fixed a bug](https://github.com/lightningnetwork/lnd/pull/10897) in the
+  sweeper whereby inputs that receive an extra budget from an aux sweeper
+  (such as custom channel outputs, whose value is mostly carried off-chain)
+  were filtered against their own budget alone. This could permanently
+  exclude such inputs from sweeping even though their input set could
+  comfortably pay its fees.
+
+* [Fixed a bug](https://github.com/lightningnetwork/lnd/pull/10963) in
+  `GetNetworkInfo` where encountering an already-seen channel skipped the
+  rest of that node's channels instead of just that channel, undercounting
+  the reported network statistics such as total network capacity, channel
+  count and max out degree.
+
 # New Features
 
 ## Functional Enhancements
@@ -53,12 +66,23 @@
   channels](https://github.com/lightningnetwork/lnd/pull/10501) via the new
   `outgoing_chan_ids` field in `RouteFeeRequest`.
 
+* A new
+  [`walletrpc.SubmitPackage`](https://github.com/lightningnetwork/lnd/pull/10900)
+  RPC submits a package of related transactions (parents first, child last) to
+  the chain backend via bitcoind's `submitpackage`, allowing a zero-fee v3/TRUC
+  parent to be accepted together with a fee-paying CPFP child.
+
 ## lncli Additions
 
 * The `estimateroutefee` command now supports [restricting fee estimates to
   specific first-hop outgoing
   channels](https://github.com/lightningnetwork/lnd/pull/10501) via the new
   `--outgoing_chan_id` flag.
+
+* A new
+  [`wallet submitpackage`](https://github.com/lightningnetwork/lnd/pull/10900)
+  command submits a package of hex-encoded transactions via the new
+  `SubmitPackage` RPC.
 
 # Improvements
 
@@ -92,6 +116,24 @@
   reader/writer validation, plus a typed `lnwire.BlindedPath` introduction-node
   codec shared by HTLC routing and onion messaging.
 
+* [BOLT 12 invoice request
+  codec](https://github.com/lightningnetwork/lnd/pull/10832): add the
+  `invoice_request` TLV message to the `bolt12/` package with structural
+  reader/writer validation. This includes an observable RPC behavior change
+  in `SubscribeOnionMessages`, ensuring a nil reply path remains nil in the
+  RPC response rather than being emitted as an empty struct.
+
+* [BOLT 12 invoice
+  codec](https://github.com/lightningnetwork/lnd/pull/10941): add the
+  `invoice` TLV message to the `bolt12/` package with structural
+  reader/writer validation. Schnorr signature verification is not yet
+  performed; callers must verify the signature independently until the
+  Merkle and signing primitives land.
+
+* [BOLT 12 invoice_error
+  codec](https://github.com/lightningnetwork/lnd/pull/10958): add the
+  `invoice_error` TLV message to `bolt12/` for onion-message replies.
+
 ## Testing
 
 ## Database
@@ -116,3 +158,4 @@
 * bitromortac
 * Boris Nagaev
 * Erick Cestari
+* Jared Tobin

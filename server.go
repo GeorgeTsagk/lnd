@@ -19,12 +19,12 @@ import (
 
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/ecdsa"
-	"github.com/btcsuite/btcd/btcutil"
-	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/connmgr"
-	"github.com/btcsuite/btcd/txscript"
-	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcd/txscript/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btclog/v2"
 	sphinx "github.com/lightningnetwork/lightning-onion"
 	"github.com/lightningnetwork/lnd/actor"
@@ -935,6 +935,7 @@ func newServer(ctx context.Context, cfg *Config, listenAddrs []net.Addr,
 	s.witnessBeacon = newPreimageBeacon(
 		dbs.ChanStateDB.NewWitnessCache(),
 		s.interceptableSwitch.ForwardPacket,
+		s.interceptableSwitch.RemoveOnChainIntercept,
 	)
 
 	chanStatusMgrCfg := &netann.ChanStatusConfig{
@@ -1363,6 +1364,11 @@ func newServer(ctx context.Context, cfg *Config, listenAddrs []net.Addr,
 		ChainHash:              *s.cfg.ActiveNetParams.GenesisHash,
 		IncomingBroadcastDelta: lncfg.DefaultIncomingBroadcastDelta,
 		OutgoingBroadcastDelta: lncfg.DefaultOutgoingBroadcastDelta,
+		CustomHtlcChecker: fn.MapOption(
+			func(t htlcswitch.AuxTrafficShaper) contractcourt.CustomHtlcChecker {
+				return t
+			},
+		)(s.implCfg.TrafficShaper),
 		NewSweepAddr: func() ([]byte, error) {
 			addr, err := newSweepPkScriptGen(
 				cc.Wallet, netParams,
@@ -1655,7 +1661,7 @@ func newServer(ctx context.Context, cfg *Config, listenAddrs []net.Addr,
 			}
 			return delay
 		},
-		WatchNewChannel: func(channel *channeldb.OpenChannel,
+		WatchNewChannel: func(channel *chanstate.OpenChannel,
 			peerKey *btcec.PublicKey) error {
 
 			// First, we'll mark this new peer as a persistent peer
@@ -3503,7 +3509,7 @@ func (s *server) createNewHiddenService(ctx context.Context) error {
 // optimization that is quicker than seeking for a channel given only the
 // ChannelID.
 func (s *server) findChannel(node *btcec.PublicKey, chanID lnwire.ChannelID) (
-	*channeldb.OpenChannel, error) {
+	*chanstate.OpenChannel, error) {
 
 	nodeChans, err := s.chanStateDB.FetchOpenChannels(node)
 	if err != nil {
@@ -4429,7 +4435,7 @@ func (s *server) notifyOpenChannelPeerEvent(op wire.OutPoint,
 // notifyPendingOpenChannelPeerEvent updates the access manager's maps and then
 // calls the channelNotifier's NotifyPendingOpenChannelEvent.
 func (s *server) notifyPendingOpenChannelPeerEvent(op wire.OutPoint,
-	pendingChan *channeldb.OpenChannel, remotePub *btcec.PublicKey) {
+	pendingChan *chanstate.OpenChannel, remotePub *btcec.PublicKey) {
 
 	// Call newPendingOpenChan to update the access manager's maps for this
 	// peer.

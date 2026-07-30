@@ -18,10 +18,10 @@ import (
 
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/ecdsa"
-	"github.com/btcsuite/btcd/btcutil"
-	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	sphinx "github.com/lightningnetwork/lightning-onion"
 	"github.com/lightningnetwork/lnd/fn/v2"
 	graphdb "github.com/lightningnetwork/lnd/graph/db"
@@ -1190,7 +1190,9 @@ func testBasicGraphPathFindingCase(t *testing.T, graphInstance *testGraphInstanc
 
 		require.Equal(
 			t, route.Hops[i+1].ChannelID,
-			payload.FwdInfo.NextHop.ToUint64(),
+			payload.FwdInfo.NextHopChannel().UnwrapOr(
+				switchhop.Exit,
+			).ToUint64(),
 		)
 	}
 
@@ -1203,7 +1205,11 @@ func testBasicGraphPathFindingCase(t *testing.T, graphInstance *testGraphInstanc
 
 	// The final hop should have a next hop value of all zeroes in order
 	// to indicate it's the exit hop.
-	require.Zero(t, payload.FwdInfo.NextHop.ToUint64())
+	require.Zero(
+		t, payload.FwdInfo.NextHopChannel().UnwrapOr(
+			switchhop.Exit,
+		).ToUint64(),
+	)
 
 	var expectedTotalFee lnwire.MilliSatoshi
 	for i := 0; i < expectedHopCount; i++ {

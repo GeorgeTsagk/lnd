@@ -10,15 +10,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcec/v2"
-	"github.com/btcsuite/btcd/btcutil"
-	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcd/txscript"
-	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcd/txscript/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/lightningnetwork/lnd/chainntnfs"
 	"github.com/lightningnetwork/lnd/channeldb"
 	"github.com/lightningnetwork/lnd/channelnotifier"
+	"github.com/lightningnetwork/lnd/chanstate"
 	"github.com/lightningnetwork/lnd/fn/v2"
 	"github.com/lightningnetwork/lnd/input"
 	"github.com/lightningnetwork/lnd/keychain"
@@ -67,7 +68,7 @@ var (
 	}
 
 	// addr is the server's reward address given to watchtower clients.
-	addr, _ = btcutil.DecodeAddress(
+	addr, _ = address.DecodeAddress(
 		"tb1pw8gzj8clt3v5lxykpgacpju5n8xteskt7gxhmudu6pa70nwfhe6s3unsyk",
 		&chaincfg.TestNet3Params,
 	)
@@ -512,7 +513,7 @@ func newHarness(t *testing.T, cfg harnessCfg) *testHarness {
 	})
 
 	fetchChannel := func(id lnwire.ChannelID) (
-		*channeldb.ChannelCloseSummary, error) {
+		*chanstate.ChannelCloseSummary, error) {
 
 		h.mu.Lock()
 		defer h.mu.Unlock()
@@ -522,7 +523,7 @@ func newHarness(t *testing.T, cfg harnessCfg) *testHarness {
 			return nil, channeldb.ErrClosedChannelNotFound
 		}
 
-		return &channeldb.ChannelCloseSummary{CloseHeight: height}, nil
+		return &chanstate.ChannelCloseSummary{CloseHeight: height}, nil
 	}
 
 	h.clientPolicy = cfg.policy
@@ -550,11 +551,11 @@ func newHarness(t *testing.T, cfg harnessCfg) *testHarness {
 
 	h.clientCfg.BuildBreachRetribution = func(id lnwire.ChannelID,
 		commitHeight uint64) (*lnwallet.BreachRetribution,
-		channeldb.ChannelType, error) {
+		chanstate.ChannelType, error) {
 
 		_, retribution := h.channelFromID(id).getState(commitHeight)
 
-		return retribution, channeldb.SimpleTaprootFeatureBit, nil
+		return retribution, chanstate.SimpleTaprootFeatureBit, nil
 	}
 
 	if !cfg.noServerStart {
@@ -687,7 +688,7 @@ func (h *testHarness) closeChannel(id uint64, height uint32) {
 	}
 
 	h.channelEvents.sendUpdate(channelnotifier.ClosedChannelEvent{
-		CloseSummary: &channeldb.ChannelCloseSummary{
+		CloseSummary: &chanstate.ChannelCloseSummary{
 			ChanPoint: wire.OutPoint{
 				Hash:  *chanPointHash,
 				Index: 0,
@@ -703,7 +704,7 @@ func (h *testHarness) registerChannel(id uint64) {
 
 	chanID := chanIDFromInt(id)
 	err := h.clientMgr.RegisterChannel(
-		chanID, channeldb.SimpleTaprootFeatureBit,
+		chanID, chanstate.SimpleTaprootFeatureBit,
 	)
 	require.NoError(h.t, err)
 }
@@ -956,7 +957,7 @@ func newServerHarness(t *testing.T, mockNet *mockNet, netAddr string,
 		ReadTimeout:  timeout,
 		WriteTimeout: timeout,
 		NodeKeyECDH:  privKeyECDH,
-		NewAddress: func() (btcutil.Address, error) {
+		NewAddress: func() (address.Address, error) {
 			return addr, nil
 		},
 	}

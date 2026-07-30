@@ -6,13 +6,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcec/v2"
-	"github.com/btcsuite/btcd/btcutil"
-	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcd/txscript"
-	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcd/txscript/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/lightningnetwork/lnd/chainntnfs"
-	"github.com/lightningnetwork/lnd/channeldb"
+	"github.com/lightningnetwork/lnd/chanstate"
 	"github.com/lightningnetwork/lnd/contractcourt"
 	"github.com/lightningnetwork/lnd/fn/v2"
 	"github.com/lightningnetwork/lnd/htlcswitch"
@@ -764,7 +765,7 @@ func TestCustomShutdownScript(t *testing.T) {
 
 	// setShutdown is a function which sets the upfront shutdown address for
 	// the local channel.
-	setShutdown := func(a, b *channeldb.OpenChannel) {
+	setShutdown := func(a, b *chanstate.OpenChannel) {
 		a.LocalShutdownScript = script
 		b.RemoteShutdownScript = script
 	}
@@ -774,7 +775,7 @@ func TestCustomShutdownScript(t *testing.T) {
 
 		// update is a function used to set values on the channel set up for the
 		// test. It is used to set values for upfront shutdown addresses.
-		update func(a, b *channeldb.OpenChannel)
+		update func(a, b *chanstate.OpenChannel)
 
 		// userCloseScript is the address specified by the user.
 		userCloseScript lnwire.DeliveryAddress
@@ -1011,11 +1012,10 @@ func TestStaticRemoteDowngrade(t *testing.T) {
 
 // genScript creates a script paying out to the address provided, which must
 // be a valid address.
-func genScript(t *testing.T, address string) lnwire.DeliveryAddress {
+func genScript(t *testing.T, addr string) lnwire.DeliveryAddress {
 	// Generate an address which can be used for testing.
-	deliveryAddr, err := btcutil.DecodeAddress(
-		address,
-		&chaincfg.TestNet3Params,
+	deliveryAddr, err := address.DecodeAddress(
+		addr, &chaincfg.TestNet3Params,
 	)
 	require.NoError(t, err, "invalid delivery address")
 
@@ -1222,8 +1222,8 @@ func assertMsgSent(t *testing.T, conn *mockMessageConn,
 func TestAlwaysSendChannelUpdate(t *testing.T) {
 	require := require.New(t)
 
-	var channel *channeldb.OpenChannel
-	channelIntercept := func(a, b *channeldb.OpenChannel) {
+	var channel *chanstate.OpenChannel
+	channelIntercept := func(a, b *chanstate.OpenChannel) {
 		channel = a
 	}
 
@@ -1432,8 +1432,8 @@ func TestStartupWriteMessageRace(t *testing.T) {
 	// createTestPeerWithChannel, so we can mark it borked below.
 	// We can't mark it borked within the callback, since the channel hasn't
 	// been saved to the DB yet when the callback executes.
-	var channel *channeldb.OpenChannel
-	getChannels := func(a, b *channeldb.OpenChannel) {
+	var channel *chanstate.OpenChannel
+	getChannels := func(a, b *chanstate.OpenChannel) {
 		channel = a
 	}
 
@@ -1633,7 +1633,7 @@ func TestCreateHtlcValidator(t *testing.T) {
 	}
 
 	// Create a mock channel with minimal required fields.
-	dbChan := &channeldb.OpenChannel{
+	dbChan := &chanstate.OpenChannel{
 		ShortChannelID: lnwire.NewShortChanIDFromInt(123),
 	}
 
@@ -1837,4 +1837,101 @@ func TestHasActiveChannels(t *testing.T) {
 
 	require.False(t, peer.hasActiveChannels())
 	require.Equal(t, int32(0), peer.numActiveChans.Load())
+}
+
+// TestRbfCoopCloseAllowed asserts that the per-channel RBF coop close
+// predicate excludes aux channels (channel types carrying a tapscript root)
+// even when both peers have negotiated the RBF coop close feature, while
+// permitting it for all other channel types.
+func TestRbfCoopCloseAllowed(t *testing.T) {
+	t.Parallel()
+
+	newPeer := func(local, remote *lnwire.RawFeatureVector) *Brontide {
+		return &Brontide{
+			cfg: Config{
+				Features: lnwire.NewFeatureVector(
+					local, lnwire.Features,
+				),
+			},
+			remoteFeatures: lnwire.NewFeatureVector(
+				remote, lnwire.Features,
+			),
+		}
+	}
+
+	var (
+		noBits = lnwire.NewRawFeatureVector()
+		rbfBit = lnwire.NewRawFeatureVector(
+			lnwire.RbfCoopCloseOptional,
+		)
+		stagingBit = lnwire.NewRawFeatureVector(
+			lnwire.RbfCoopCloseOptionalStaging,
+		)
+
+		overlayChan = chanstate.SimpleTaprootFeatureBit |
+			chanstate.TapscriptRootBit
+	)
+
+	tests := []struct {
+		name     string
+		peer     *Brontide
+		chanType chanstate.ChannelType
+		allowed  bool
+	}{
+		{
+			name:     "both signal, plain channel",
+			peer:     newPeer(rbfBit, rbfBit),
+			chanType: chanstate.SingleFunderTweaklessBit,
+			allowed:  true,
+		},
+		{
+			name:     "both signal staging, plain channel",
+			peer:     newPeer(stagingBit, stagingBit),
+			chanType: chanstate.SingleFunderTweaklessBit,
+			allowed:  true,
+		},
+		{
+			name:     "both signal, simple taproot channel",
+			peer:     newPeer(rbfBit, rbfBit),
+			chanType: chanstate.SimpleTaprootFeatureBit,
+			allowed:  true,
+		},
+		{
+			name:     "both signal, aux (overlay) channel",
+			peer:     newPeer(rbfBit, rbfBit),
+			chanType: overlayChan,
+			allowed:  false,
+		},
+		{
+			name:     "both signal staging, aux (overlay) channel",
+			peer:     newPeer(stagingBit, stagingBit),
+			chanType: overlayChan,
+			allowed:  false,
+		},
+		{
+			name:     "only local signals, plain channel",
+			peer:     newPeer(rbfBit, noBits),
+			chanType: chanstate.SingleFunderTweaklessBit,
+			allowed:  false,
+		},
+		{
+			name:     "neither signals, aux (overlay) channel",
+			peer:     newPeer(noBits, noBits),
+			chanType: overlayChan,
+			allowed:  false,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(
+				t, test.allowed,
+				test.peer.rbfCoopCloseAllowed(
+					test.chanType,
+				),
+			)
+		})
+	}
 }

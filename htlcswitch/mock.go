@@ -17,11 +17,12 @@ import (
 
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/ecdsa"
-	"github.com/btcsuite/btcd/btcutil"
-	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	sphinx "github.com/lightningnetwork/lightning-onion"
 	"github.com/lightningnetwork/lnd/chainntnfs"
 	"github.com/lightningnetwork/lnd/channeldb"
+	"github.com/lightningnetwork/lnd/chanstate"
 	"github.com/lightningnetwork/lnd/clock"
 	"github.com/lightningnetwork/lnd/contractcourt"
 	"github.com/lightningnetwork/lnd/fn/v2"
@@ -74,7 +75,7 @@ func (m *mockPreimageCache) AddPreimages(preimages ...lntypes.Preimage) error {
 }
 
 func (m *mockPreimageCache) SubscribeUpdates(
-	chanID lnwire.ShortChannelID, htlc *channeldb.HTLC,
+	chanID lnwire.ShortChannelID, htlc *chanstate.HTLC,
 	payload *hop.Payload,
 	nextHopOnionBlob []byte) (*contractcourt.WitnessSubscription, error) {
 
@@ -367,7 +368,13 @@ func (r *mockHopIterator) EncodeNextHop(w io.Writer) error {
 }
 
 func encodeFwdInfo(w io.Writer, f *hop.ForwardingInfo) error {
-	if err := binary.Write(w, binary.BigEndian, f.NextHop); err != nil {
+	if f.NextHop.IsRight() {
+		return fmt.Errorf("mock serialization does not support " +
+			"node-ID next hop")
+	}
+
+	nextHop := f.NextHopChannel().UnwrapOr(hop.Exit)
+	if err := binary.Write(w, binary.BigEndian, nextHop); err != nil {
 		return err
 	}
 
@@ -375,7 +382,8 @@ func encodeFwdInfo(w io.Writer, f *hop.ForwardingInfo) error {
 		return err
 	}
 
-	if err := binary.Write(w, binary.BigEndian, f.OutgoingCTLV); err != nil {
+	err := binary.Write(w, binary.BigEndian, f.OutgoingCLTV)
+	if err != nil {
 		return err
 	}
 
@@ -508,13 +516,14 @@ func (p *mockIteratorDecoder) DecodeHopIterator(r io.Reader, rHash []byte,
 		}
 
 		var nextHopBytes [8]byte
-		binary.BigEndian.PutUint64(nextHopBytes[:], f.NextHop.ToUint64())
+		scid := f.NextHopChannel().UnwrapOr(hop.Exit)
+		binary.BigEndian.PutUint64(nextHopBytes[:], scid.ToUint64())
 
 		hops[i] = hop.NewLegacyPayload(&sphinx.HopData{
 			Realm:         [1]byte{}, // hop.BitcoinNetwork
 			NextAddress:   nextHopBytes,
 			ForwardAmount: uint64(f.AmountToForward),
-			OutgoingCltv:  f.OutgoingCTLV,
+			OutgoingCltv:  f.OutgoingCLTV,
 		})
 	}
 
@@ -561,15 +570,18 @@ func (p *mockIteratorDecoder) DecodeHopIterators(id []byte,
 }
 
 func decodeFwdInfo(r io.Reader, f *hop.ForwardingInfo) error {
-	if err := binary.Read(r, binary.BigEndian, &f.NextHop); err != nil {
+	var nextHop lnwire.ShortChannelID
+	if err := binary.Read(r, binary.BigEndian, &nextHop); err != nil {
 		return err
 	}
+	f.NextHop = hop.NewChannelNextHop(nextHop)
 
 	if err := binary.Read(r, binary.BigEndian, &f.AmountToForward); err != nil {
 		return err
 	}
 
-	if err := binary.Read(r, binary.BigEndian, &f.OutgoingCTLV); err != nil {
+	err := binary.Read(r, binary.BigEndian, &f.OutgoingCLTV)
+	if err != nil {
 		return err
 	}
 

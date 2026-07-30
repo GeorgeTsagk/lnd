@@ -14,10 +14,10 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/btcec/v2"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/connmgr"
-	"github.com/btcsuite/btcd/txscript"
-	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcd/txscript/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btclog/v2"
 	"github.com/lightningnetwork/lnd/actor"
 	"github.com/lightningnetwork/lnd/aliasmgr"
@@ -123,7 +123,7 @@ type outgoingMsg struct {
 	errChan  chan error // MUST be buffered.
 }
 
-// newChannelMsg packages a channeldb.OpenChannel with a channel that allows
+// newChannelMsg packages a chanstate.OpenChannel with a channel that allows
 // the receiver of the request to report when the channel creation process has
 // completed.
 type newChannelMsg struct {
@@ -1089,16 +1089,26 @@ func (p *Brontide) taprootShutdownAllowed() bool {
 		p.LocalFeatures().HasFeature(lnwire.ShutdownAnySegwitOptional)
 }
 
-// rbfCoopCloseAllowed returns true if both parties have negotiated the new RBF
-// coop close feature.
-func (p *Brontide) rbfCoopCloseAllowed() bool {
+// rbfCoopCloseAllowed returns true if the new RBF coop close flow can be
+// used for a channel of the given type: both parties must have negotiated
+// the RBF coop close feature, and the channel must not be an aux channel.
+// Aux channels (taproot overlay channels, marked by a tapscript root) are
+// excluded even when both peers signal the RBF feature bit: the RBF close
+// state machine does not invoke any of the aux closer hooks, so closing an
+// aux channel through it would produce a close transaction without the aux
+// outputs (destroying the committed assets), which the aux closer is then
+// unable to finalize once the transaction confirms. Such channels fall back
+// to the legacy negotiate closer, which is aux-aware.
+func (p *Brontide) rbfCoopCloseAllowed(chanType chanstate.ChannelType) bool {
 	bothHaveBit := func(bit lnwire.FeatureBit) bool {
 		return p.RemoteFeatures().HasFeature(bit) &&
 			p.LocalFeatures().HasFeature(bit)
 	}
 
-	return bothHaveBit(lnwire.RbfCoopCloseOptional) ||
+	featureNegotiated := bothHaveBit(lnwire.RbfCoopCloseOptional) ||
 		bothHaveBit(lnwire.RbfCoopCloseOptionalStaging)
+
+	return featureNegotiated && !chanType.HasTapscriptRoot()
 }
 
 // QuitSignal is a method that should return a channel which will be sent upon
@@ -1142,7 +1152,9 @@ func (p *Brontide) addrWithInternalKey(
 // channels returned by the database. It returns a slice of channel reestablish
 // messages that should be sent to the peer immediately, in case we have borked
 // channels that haven't been closed yet.
-func (p *Brontide) loadActiveChannels(chans []*channeldb.OpenChannel) (
+//
+//nolint:funlen
+func (p *Brontide) loadActiveChannels(chans []*chanstate.OpenChannel) (
 	[]lnwire.Message, error) {
 
 	// Return a slice of messages to send to the peers in case the channel
@@ -1375,9 +1387,9 @@ func (p *Brontide) loadActiveChannels(chans []*channeldb.OpenChannel) (
 			shutdownInfoErr error
 		)
 		shutdownInfo.WhenSome(func(info channeldb.ShutdownInfo) {
-			// If we can use the new RBF close feature, we don't
-			// need to create the legacy closer.
-			if p.rbfCoopCloseAllowed() {
+			// If we can use the new RBF close feature for this
+			// channel, we don't need to create the legacy closer.
+			if p.rbfCoopCloseAllowed(dbChan.ChanType) {
 				return
 			}
 
@@ -1453,9 +1465,9 @@ func (p *Brontide) loadActiveChannels(chans []*channeldb.OpenChannel) (
 
 		p.storeActiveChannel(chanID, lnChan)
 
-		// We're using the old co-op close, so we don't need to init
-		// the new RBF chan closer.
-		if !p.rbfCoopCloseAllowed() {
+		// We're using the old co-op close for this channel, so we
+		// don't need to init the new RBF chan closer.
+		if !p.rbfCoopCloseAllowed(dbChan.ChanType) {
 			continue
 		}
 
@@ -1592,7 +1604,7 @@ func (p *Brontide) addLink(chanPoint *wire.OutPoint,
 
 // maybeSendNodeAnn sends our node announcement to the remote peer if at least
 // one confirmed public channel exists with them.
-func (p *Brontide) maybeSendNodeAnn(channels []*channeldb.OpenChannel) {
+func (p *Brontide) maybeSendNodeAnn(channels []*chanstate.OpenChannel) {
 	defer p.cg.WgDone()
 
 	hasConfirmedPublicChan := false
@@ -3638,13 +3650,15 @@ func (p *Brontide) restartCoopClose(lnChan *lnwallet.LightningChannel) (
 	// the LocalUpfrontShutdownScript or generate a script.
 	c := lnChan.State()
 	_, err := c.BroadcastedCooperative()
-	if err != nil && err != channeldb.ErrNoCloseTx {
-		// An error other than ErrNoCloseTx was encountered.
+
+	// Any error other than "no close tx" is a real failure.
+	if err != nil && !errors.Is(err, channeldb.ErrNoCloseTx) {
 		return nil, err
-	} else if err == nil && !p.rbfCoopCloseAllowed() {
-		// This is a channel that doesn't support RBF coop close, and it
-		// already had a coop close txn broadcast. As a result, we can
-		// just exit here as all we can do is wait for it to confirm.
+	}
+
+	// A close tx was already broadcast and this channel can't use RBF
+	// coop close, so all we can do is wait for it to confirm.
+	if err == nil && !p.rbfCoopCloseAllowed(c.ChanType) {
 		return nil, nil
 	}
 
@@ -3679,10 +3693,10 @@ func (p *Brontide) restartCoopClose(lnChan *lnwallet.LightningChannel) (
 		}
 	}
 
-	// If the new RBF co-op close is negotiated, then we'll init and start
-	// that state machine, skipping the steps for the negotiate machine
-	// below.
-	if p.rbfCoopCloseAllowed() {
+	// If the new RBF co-op close is negotiated and usable for this
+	// channel, then we'll init and start that state machine, skipping the
+	// steps for the negotiate machine below.
+	if p.rbfCoopCloseAllowed(c.ChanType) {
 		_, err := p.initRbfChanCloser(lnChan)
 		if err != nil {
 			return nil, fmt.Errorf("unable to init rbf chan "+
@@ -4170,6 +4184,15 @@ func (p *Brontide) chanFlushEventSentinel(chanCloser *chancloser.RbfChanCloser,
 func (p *Brontide) initRbfChanCloser(
 	channel *lnwallet.LightningChannel) (*chancloser.RbfChanCloser, error) {
 
+	// Aux channels can't use the RBF coop close flow, as the state
+	// machine doesn't invoke the aux closer hooks needed to construct an
+	// aux-aware close transaction.
+	if channel.ChanType().HasTapscriptRoot() {
+		return nil, fmt.Errorf("ChannelPoint(%v): RBF coop close "+
+			"not supported for aux channels",
+			channel.ChannelPoint())
+	}
+
 	chanID := lnwire.NewChanIDFromOutPoint(channel.ChannelPoint())
 
 	link := p.fetchLinkFromKeyAndCid(chanID)
@@ -4593,7 +4616,7 @@ func (p *Brontide) handleLocalCloseReq(req *htlcswitch.ChanClose) {
 		// iteration, in which case we'll be obtaining a new
 		// transaction w/ a higher fee rate.
 		//
-		case p.rbfCoopCloseAllowed():
+		case p.rbfCoopCloseAllowed(channel.ChanType()):
 			err = p.startRbfChanCloser(
 				newRPCShutdownInit(req), channel.ChannelPoint(),
 			)
@@ -5496,7 +5519,7 @@ func (p *Brontide) attachChannelEventSubscription() error {
 
 // updateNextRevocation updates the existing channel's next revocation if it's
 // nil.
-func (p *Brontide) updateNextRevocation(c *channeldb.OpenChannel) error {
+func (p *Brontide) updateNextRevocation(c *chanstate.OpenChannel) error {
 	chanPoint := c.FundingOutpoint
 	chanID := lnwire.NewChanIDFromOutPoint(chanPoint)
 
@@ -5538,7 +5561,7 @@ func (p *Brontide) updateNextRevocation(c *channeldb.OpenChannel) error {
 }
 
 // addActiveChannel adds a new active channel to the `activeChannels` map. It
-// takes a `channeldb.OpenChannel`, creates a `lnwallet.LightningChannel` from
+// takes a `chanstate.OpenChannel`, creates a `lnwallet.LightningChannel` from
 // it and assembles it with a channel link.
 func (p *Brontide) addActiveChannel(c *lnpeer.NewChannel) error {
 	chanPoint := c.FundingOutpoint
@@ -5623,9 +5646,9 @@ func (p *Brontide) addActiveChannel(c *lnpeer.NewChannel) error {
 			"peer", chanPoint)
 	}
 
-	// We're using the old co-op close, so we don't need to init the new RBF
-	// chan closer.
-	if !p.rbfCoopCloseAllowed() {
+	// We're using the old co-op close for this channel, so we don't need
+	// to init the new RBF chan closer.
+	if !p.rbfCoopCloseAllowed(lnChan.ChanType()) {
 		return nil
 	}
 
@@ -5797,7 +5820,7 @@ func (p *Brontide) scaleTimeout(timeout time.Duration) time.Duration {
 // bandwidth against the traffic shaper.
 type auxHtlcValidator struct {
 	peer   *Brontide
-	dbChan *channeldb.OpenChannel
+	dbChan *chanstate.OpenChannel
 	ts     htlcswitch.AuxTrafficShaper
 }
 
@@ -5873,7 +5896,7 @@ func (v *auxHtlcValidator) ValidateHtlc(amount,
 
 // createHtlcValidator creates an HTLC validator that performs final aux balance
 // validation before HTLCs are added to the channel state.
-func (p *Brontide) createHtlcValidator(dbChan *channeldb.OpenChannel,
+func (p *Brontide) createHtlcValidator(dbChan *chanstate.OpenChannel,
 	ts htlcswitch.AuxTrafficShaper) lnwallet.AuxHtlcValidator {
 
 	return &auxHtlcValidator{

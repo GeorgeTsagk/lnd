@@ -11,7 +11,7 @@ import (
 	"testing"
 
 	"github.com/btcsuite/btcd/btcec/v2"
-	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/walletdb"
 	mig "github.com/lightningnetwork/lnd/channeldb/migration"
 	"github.com/lightningnetwork/lnd/channeldb/migration12"
@@ -32,6 +32,7 @@ import (
 	"github.com/lightningnetwork/lnd/channeldb/migration34"
 	"github.com/lightningnetwork/lnd/channeldb/migration35"
 	"github.com/lightningnetwork/lnd/channeldb/migration_01_to_11"
+	"github.com/lightningnetwork/lnd/chanstate"
 	"github.com/lightningnetwork/lnd/clock"
 	graphdb "github.com/lightningnetwork/lnd/graph/db"
 	"github.com/lightningnetwork/lnd/invoices"
@@ -42,6 +43,14 @@ import (
 
 const (
 	dbName = "channel.db"
+
+	// missingDBVersionRecoveryVersion is the latest mandatory DB
+	// version before the init ordering regression that could create a
+	// DB without writing the DB version key. Affected DBs are therefore
+	// already at least this version, so recovery starts here to run the
+	// v0.21 waiting proof migration without replaying older migrations
+	// against a modern DB.
+	missingDBVersionRecoveryVersion = 33
 )
 
 var (
@@ -501,21 +510,36 @@ func initChannelDB(db kvdb.Backend) error {
 			return err
 		}
 
+		meta := &Meta{}
+		metaErr := FetchMeta(meta, tx)
+
 		for _, tlb := range dbTopLevelBuckets {
 			if _, err := tx.CreateTopLevelBucket(tlb); err != nil {
 				return err
 			}
 		}
 
-		meta := &Meta{}
-		// Check if DB is already initialized.
-		err := FetchMeta(meta, tx)
-		if err == nil {
+		switch {
+		// Metadata with a DB version already exists. Required
+		// top-level buckets were created above, so init is complete.
+		case metaErr == nil:
+			return nil
+
+		// There is no metadata bucket at all, so this is a fresh DB.
+		// Initialize the DB version after creating the required
+		// top-level buckets.
+		case errors.Is(metaErr, ErrMetaNotFound):
+			meta.DbVersionNumber = getLatestDBVersion(dbVersions)
+			return putMeta(meta, tx)
+
+		// The DB already has a metadata bucket but no version key.
+		// Leave recovery to the migration path, which can infer a
+		// safe starting version before writing the version key.
+		case errors.Is(metaErr, ErrDBVersionNotFound):
 			return nil
 		}
 
-		meta.DbVersionNumber = getLatestDBVersion(dbVersions)
-		return putMeta(meta, tx)
+		return metaErr
 	}, func() {})
 	if err != nil {
 		return fmt.Errorf("unable to create new channeldb: %w", err)
@@ -777,10 +801,7 @@ func (c *ChannelStateDB) FetchChannelByID(id lnwire.ChannelID) (*OpenChannel,
 }
 
 // ChanCount is used by the server in determining access control.
-type ChanCount struct {
-	HasOpenOrClosedChan bool
-	PendingOpenCount    uint64
-}
+type ChanCount = chanstate.ChanCount
 
 // FetchPermAndTempPeers returns a map where the key is the remote node's
 // public key and the value is a struct that has a tally of the pending-open
@@ -1678,17 +1699,8 @@ func (c *ChannelStateDB) RepairLinkNodes(network wire.BitcoinNet) error {
 }
 
 // ChannelShell is a shell of a channel that is meant to be used for channel
-// recovery purposes. It contains a minimal OpenChannel instance along with
-// addresses for that target node.
-type ChannelShell struct {
-	// NodeAddrs the set of addresses that this node has known to be
-	// reachable at in the past.
-	NodeAddrs []net.Addr
-
-	// Chan is a shell of an OpenChannel, it contains only the items
-	// required to restore the channel on disk.
-	Chan *OpenChannel
-}
+// recovery purposes.
+type ChannelShell = chanstate.ChannelShell
 
 // RestoreChannelShells is a method that allows the caller to reconstruct the
 // state of an OpenChannel from the ChannelShell. We'll attempt to write the
@@ -1705,7 +1717,10 @@ func (c *ChannelStateDB) RestoreChannelShells(channelShells ...*ChannelShell) er
 			// been restored, this will signal to other sub-systems
 			// to not attempt to use the channel as if it was a
 			// regular one.
-			channel.chanStatus |= ChanStatusRestored
+			channel.SetChannelStatusForStore(
+				channel.ChannelStatusForStore() |
+					ChanStatusRestored,
+			)
 
 			// First, we'll attempt to create a new open channel
 			// and link node for this channel. If the channel
@@ -1713,7 +1728,7 @@ func (c *ChannelStateDB) RestoreChannelShells(channelShells ...*ChannelShell) er
 			// is idempotent, we'll continue to the next step.
 			channel.Db = c
 			err := syncNewChannel(
-				tx, channel, channelShell.NodeAddrs,
+				tx, channel, channelShell.NodeAddrs, c.backend,
 			)
 			if err != nil {
 				return err
@@ -1862,16 +1877,43 @@ func (c *ChannelStateDB) DeleteChannelOpeningState(outPoint []byte) error {
 // applies migration functions to the current database and recovers the
 // previous state of db if at least one error/panic appeared during migration.
 func (d *DB) syncVersions(versions []mandatoryVersion) error {
+	latestVersion := getLatestDBVersion(versions)
+
 	meta, err := d.FetchMeta()
 	if err != nil {
-		if err == ErrMetaNotFound {
+		switch {
+		case errors.Is(err, ErrMetaNotFound):
 			meta = &Meta{}
-		} else {
+
+		case errors.Is(err, ErrDBVersionNotFound):
+			recoveryVersion := uint32(
+				missingDBVersionRecoveryVersion,
+			)
+
+			// Missing DB version recovery is only valid for DBs
+			// created after the init ordering regression. Older DBs
+			// wrote the DB version before init returned, so a
+			// missing version key on a sub-33 DB is not a valid
+			// state to infer from.
+			if latestVersion < recoveryVersion {
+				return fmt.Errorf("unable to recover missing "+
+					"DB version key: latest_version=%v "+
+					"recovery_version=%v", latestVersion,
+					recoveryVersion)
+			}
+
+			log.Warnf("DB version key missing, recovering from "+
+				"db_version=%v", recoveryVersion)
+
+			meta = &Meta{
+				DbVersionNumber: recoveryVersion,
+			}
+
+		default:
 			return err
 		}
 	}
 
-	latestVersion := getLatestDBVersion(versions)
 	log.Infof("Checking for schema update: latest_version=%v, "+
 		"db_version=%v", latestVersion, meta.DbVersionNumber)
 

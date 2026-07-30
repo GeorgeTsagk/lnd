@@ -21,15 +21,16 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/ecdsa"
-	"github.com/btcsuite/btcd/btcutil"
-	"github.com/btcsuite/btcd/btcutil/psbt"
-	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcd/txscript"
-	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcd/psbt/v2"
+	"github.com/btcsuite/btcd/txscript/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet"
 	"github.com/btcsuite/btcwallet/wallet/txauthor"
@@ -42,6 +43,7 @@ import (
 	"github.com/lightningnetwork/lnd/chanfitness"
 	"github.com/lightningnetwork/lnd/channeldb"
 	"github.com/lightningnetwork/lnd/channelnotifier"
+	"github.com/lightningnetwork/lnd/chanstate"
 	"github.com/lightningnetwork/lnd/clock"
 	"github.com/lightningnetwork/lnd/contractcourt"
 	"github.com/lightningnetwork/lnd/discovery"
@@ -1050,7 +1052,7 @@ func addrPairsToOutputs(addrPairs map[string]int64,
 
 	outputs := make([]*wire.TxOut, 0, len(addrPairs))
 	for addr, amt := range addrPairs {
-		addr, err := btcutil.DecodeAddress(addr, params)
+		addr, err := address.DecodeAddress(addr, params)
 		if err != nil {
 			return nil, err
 		}
@@ -1387,7 +1389,7 @@ func (r *rpcServer) SendCoins(ctx context.Context,
 
 	// Decode the address receiving the coins, we need to check whether the
 	// address is valid for this network.
-	targetAddr, err := btcutil.DecodeAddress(
+	targetAddr, err := address.DecodeAddress(
 		in.Addr, r.cfg.ActiveNetParams.Params,
 	)
 	if err != nil {
@@ -1681,7 +1683,7 @@ func (r *rpcServer) NewAddress(ctx context.Context,
 	// Translate the gRPC proto address type to the wallet controller's
 	// available address types.
 	var (
-		addr btcutil.Address
+		addr address.Address
 		err  error
 	)
 	switch in.Type {
@@ -2963,7 +2965,7 @@ func (r *rpcServer) CloseChannel(in *lnrpc.CloseChannelRequest,
 		// If a delivery address to close out to was specified, decode it.
 		if len(in.DeliveryAddress) > 0 {
 			// Decode the address provided.
-			addr, err := btcutil.DecodeAddress(
+			addr, err := address.DecodeAddress(
 				in.DeliveryAddress, r.cfg.ActiveNetParams.Params,
 			)
 			if err != nil {
@@ -4009,7 +4011,7 @@ type (
 // 1. The current blockchain height
 // 2. The block height at which the funding transaction was first confirmed
 // 3. The total number of confirmations required for the channel.
-func calcRemainingConfs(pendingChan *channeldb.OpenChannel,
+func calcRemainingConfs(pendingChan *chanstate.OpenChannel,
 	currentHeight uint32) uint32 {
 
 	// If the funding transaction hasn't been confirmed yet,
@@ -4314,7 +4316,7 @@ func (r *rpcServer) fetchWaitingCloseChannels(
 	// getClosingTx is a helper closure that tries to find the closing tx of
 	// a given waiting close channel. Notice that if the remote closes the
 	// channel, we may not have the closing tx.
-	getClosingTx := func(c *channeldb.OpenChannel) (*wire.MsgTx, error) {
+	getClosingTx := func(c *chanstate.OpenChannel) (*wire.MsgTx, error) {
 		var (
 			tx  *wire.MsgTx
 			err error
@@ -4954,7 +4956,7 @@ func createChannelConstraint(
 
 // isPrivate evaluates the ChannelFlags of the db channel to determine if the
 // channel is private or not.
-func isPrivate(dbChannel *channeldb.OpenChannel) bool {
+func isPrivate(dbChannel *chanstate.OpenChannel) bool {
 	if dbChannel == nil {
 		return false
 	}
@@ -4963,7 +4965,7 @@ func isPrivate(dbChannel *channeldb.OpenChannel) bool {
 
 // encodeCustomChanData encodes the custom channel data for the open channel.
 // It encodes that data as a pair of var bytes blobs.
-func encodeCustomChanData(lnChan *channeldb.OpenChannel) ([]byte, error) {
+func encodeCustomChanData(lnChan *chanstate.OpenChannel) ([]byte, error) {
 	customOpenChanData := lnChan.CustomBlob.UnwrapOr(nil)
 	customLocalCommitData := lnChan.LocalCommitment.CustomBlob.UnwrapOr(nil)
 
@@ -4994,7 +4996,7 @@ func encodeCustomChanData(lnChan *channeldb.OpenChannel) ([]byte, error) {
 //
 //nolint:funlen
 func createRPCOpenChannel(ctx context.Context, r *rpcServer,
-	dbChannel *channeldb.OpenChannel,
+	dbChannel *chanstate.OpenChannel,
 	isActive, peerAliasLookup bool) (*lnrpc.Channel, error) {
 
 	nodePub := dbChannel.IdentityPub
@@ -6679,11 +6681,10 @@ func (r *rpcServer) GetNetworkInfo(ctx context.Context,
 			// channel encountered.
 			outDegree++
 
-			// If we've already seen this channel, then we'll
-			// return early to ensure that we don't double-count
-			// stats.
+			// If we've already seen this channel, skip it to
+			// ensure that we don't double-count stats.
 			if _, ok := seenChans[edge.ChannelID]; ok {
-				return nil
+				continue
 			}
 
 			// Compare the capacity of this channel against the
@@ -7499,14 +7500,10 @@ func (r *rpcServer) UpdateChannelPolicy(ctx context.Context,
 
 	// We'll also ensure that the user isn't setting a CLTV delta that
 	// won't give outgoing HTLCs enough time to fully resolve if needed.
-	if req.TimeLockDelta < minTimeLockDelta {
-		return nil, fmt.Errorf("time lock delta of %v is too small, "+
-			"minimum supported is %v", req.TimeLockDelta,
-			minTimeLockDelta)
-	} else if req.TimeLockDelta > uint32(MaxTimeLockDelta) {
-		return nil, fmt.Errorf("time lock delta of %v is too big, "+
-			"maximum supported is %v", req.TimeLockDelta,
-			MaxTimeLockDelta)
+	if err := validateChannelPolicyTimeLockDelta(
+		req.TimeLockDelta, r.cfg.MaxOutgoingCltvExpiry,
+	); err != nil {
+		return nil, err
 	}
 
 	// By default, positive inbound fees are rejected.
@@ -8797,25 +8794,8 @@ func (r *rpcServer) SubscribeOnionMessages(
 					"failed type assertion: %T", update)
 			}
 
-			bp := &lnrpc.BlindedPath{}
-
-			//nolint:ll
-			if oMsg.ReplyPath != nil {
-				// TODO(bolt12): resolve sciddir intros via
-				// sciddirResolver so this field is uniformly a
-				// 33-byte pubkey?
-				bp.IntroductionNode = oMsg.ReplyPath.IntroductionNode.Bytes()
-				bp.BlindingPoint = oMsg.ReplyPath.BlindingPoint.SerializeCompressed()
-
-				for _, hop := range oMsg.ReplyPath.Hops {
-					bp.BlindedHops = append(
-						bp.BlindedHops, &lnrpc.BlindedHop{
-							BlindedNode:   hop.BlindedNodeID.SerializeCompressed(),
-							EncryptedData: hop.EncryptedData,
-						},
-					)
-				}
-			}
+			// Perform a verbatim pass-through of any reply path.
+			bp := marshallBlindedPath(oMsg.ReplyPath)
 
 			//nolint:ll
 			err := server.Send(&lnrpc.OnionMessageUpdate{
@@ -8831,6 +8811,34 @@ func (r *rpcServer) SubscribeOnionMessages(
 			}
 		}
 	}
+}
+
+// marshallBlindedPath converts a wire-form blinded path into its RPC
+// counterpart. If the input is nil, nil is returned.
+func marshallBlindedPath(p *lnwire.BlindedPath) *lnrpc.BlindedPath {
+	if p == nil {
+		return nil
+	}
+
+	bp := &lnrpc.BlindedPath{
+		// The introduction node may be a short-channel-id direction
+		// rather than a node public key. We pass it through verbatim
+		// instead of resolving it, which would need a graph db query.
+		IntroductionNode: p.IntroductionNode.Bytes(),
+		BlindingPoint:    p.BlindingPoint.SerializeCompressed(),
+	}
+
+	for _, hop := range p.Hops {
+		blindedNode := hop.BlindedNodeID.SerializeCompressed()
+		bp.BlindedHops = append(
+			bp.BlindedHops, &lnrpc.BlindedHop{
+				BlindedNode:   blindedNode,
+				EncryptedData: hop.EncryptedData,
+			},
+		)
+	}
+
+	return bp
 }
 
 // ListAliases returns the set of all aliases we have ever allocated along with

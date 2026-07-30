@@ -4,7 +4,7 @@ import (
 	"context"
 	"io"
 
-	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/lightningnetwork/lnd/channeldb"
 	"github.com/lightningnetwork/lnd/graph/db/models"
 	"github.com/lightningnetwork/lnd/htlcswitch/hop"
@@ -35,6 +35,15 @@ type Registry interface {
 
 	// HodlUnsubscribeAll unsubscribes from all htlc resolutions.
 	HodlUnsubscribeAll(subscriber chan<- interface{})
+}
+
+// CustomHtlcChecker identifies HTLCs whose final-hop amount validation is
+// handled by auxiliary channel logic instead of the standard onion amount
+// field.
+type CustomHtlcChecker interface {
+	// IsCustomHTLC returns true if the HTLC carries custom records that
+	// make it subject to auxiliary HTLC handling.
+	IsCustomHTLC(htlcRecords lnwire.CustomRecords) bool
 }
 
 // OnionProcessor is an interface used to decode onion blobs.

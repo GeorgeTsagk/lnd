@@ -12,19 +12,21 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/ecdsa"
-	"github.com/btcsuite/btcd/btcutil"
-	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcd/txscript"
-	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcd/txscript/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/lightninglabs/neutrino/cache"
 	"github.com/lightninglabs/neutrino/cache/lru"
 	"github.com/lightningnetwork/lnd/actor"
 	"github.com/lightningnetwork/lnd/batch"
 	"github.com/lightningnetwork/lnd/chainntnfs"
 	"github.com/lightningnetwork/lnd/channeldb"
+	"github.com/lightningnetwork/lnd/chanstate"
 	"github.com/lightningnetwork/lnd/fn/v2"
 	"github.com/lightningnetwork/lnd/graph"
 	graphdb "github.com/lightningnetwork/lnd/graph/db"
@@ -383,7 +385,7 @@ type Config struct {
 	// FindChannel allows the gossiper to find a channel that we're party
 	// to without iterating over the entire set of open channels.
 	FindChannel func(node *btcec.PublicKey, chanID lnwire.ChannelID) (
-		*channeldb.OpenChannel, error)
+		*chanstate.OpenChannel, error)
 
 	// IsStillZombieChannel returns true if the channel described by info
 	// should still be considered a zombie.
@@ -2161,7 +2163,7 @@ func (d *AuthenticatedGossiper) processRejectedEdge(_ context.Context,
 
 // fetchPKScript fetches the output script for the given SCID.
 func (d *AuthenticatedGossiper) fetchPKScript(chanID lnwire.ShortChannelID) (
-	txscript.ScriptClass, btcutil.Address, error) {
+	txscript.ScriptClass, address.Address, error) {
 
 	pkScript, err := lnwallet.FetchPKScriptWithQuit(
 		d.cfg.ChainIO, chanID, d.quit,

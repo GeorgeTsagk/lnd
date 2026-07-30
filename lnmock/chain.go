@@ -3,10 +3,10 @@ package lnmock
 import (
 	"context"
 
+	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcjson"
-	"github.com/btcsuite/btcd/btcutil"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/stretchr/testify/mock"
@@ -128,15 +128,15 @@ func (m *MockChain) SendRawTransaction(tx *wire.MsgTx, allowHighFees bool) (
 	return args.Get(0).(*chainhash.Hash), args.Error(1)
 }
 
-func (m *MockChain) Rescan(startHash *chainhash.Hash, addrs []btcutil.Address,
-	outPoints map[wire.OutPoint]btcutil.Address) error {
+func (m *MockChain) Rescan(startHash *chainhash.Hash, addrs []address.Address,
+	outPoints map[wire.OutPoint]address.Address) error {
 
 	args := m.Called(startHash, addrs, outPoints)
 
 	return args.Error(0)
 }
 
-func (m *MockChain) NotifyReceived(addrs []btcutil.Address) error {
+func (m *MockChain) NotifyReceived(addrs []address.Address) error {
 	args := m.Called(addrs)
 
 	return args.Error(0)
@@ -170,6 +170,19 @@ func (m *MockChain) TestMempoolAccept(txns []*wire.MsgTx, maxFeeRate float64) (
 	}
 
 	return args.Get(0).([]*btcjson.TestMempoolAcceptResult), args.Error(1)
+}
+
+// SubmitPackage is a mock implementation of the chain.Interface method.
+func (m *MockChain) SubmitPackage(txns []*wire.MsgTx,
+	maxFeeRate *float64) (*btcjson.SubmitPackageResult, error) {
+
+	args := m.Called(txns, maxFeeRate)
+
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+
+	return args.Get(0).(*btcjson.SubmitPackageResult), args.Error(1)
 }
 
 func (m *MockChain) MapRPCErr(err error) error {

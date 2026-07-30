@@ -7,13 +7,14 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/btcsuite/btcd/btcutil"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcd/address/v2"
+	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/lightningnetwork/lnd/chainio"
 	"github.com/lightningnetwork/lnd/chainntnfs"
 	"github.com/lightningnetwork/lnd/channeldb"
+	"github.com/lightningnetwork/lnd/chanstate"
 	"github.com/lightningnetwork/lnd/clock"
 	"github.com/lightningnetwork/lnd/fn/v2"
 	"github.com/lightningnetwork/lnd/graph/db/models"
@@ -75,6 +76,11 @@ type ChainArbitratorConfig struct {
 	// htlcs. This value can be lower than the incoming broadcast delta.
 	OutgoingBroadcastDelta uint32
 
+	// CustomHtlcChecker optionally identifies HTLCs that should bypass the
+	// standard final-hop amount check because their amount validation is
+	// handled by auxiliary channel logic.
+	CustomHtlcChecker fn.Option[CustomHtlcChecker]
+
 	// NewSweepAddr is a function that returns a new address under control
 	// by the wallet. We'll use this to sweep any no-delay outputs as a
 	// result of unilateral channel closes.
@@ -113,7 +119,7 @@ type ChainArbitratorConfig struct {
 	// IsOurAddress is a function that returns true if the passed address
 	// is known to the underlying wallet. Otherwise, false should be
 	// returned.
-	IsOurAddress func(btcutil.Address) bool
+	IsOurAddress func(address.Address) bool
 
 	// IncubateOutputs sends either an incoming HTLC, an outgoing HTLC, or
 	// both to the utxo nursery. Once this function returns, the nursery
@@ -326,7 +332,7 @@ var _ chainio.Consumer = (*ChainArbitrator)(nil)
 // interact with.
 type arbChannel struct {
 	// channel is the in-memory channel state.
-	channel *channeldb.OpenChannel
+	channel *chanstate.OpenChannel
 
 	// c references the chain arbitrator and is used by arbChannel
 	// internally.
@@ -447,7 +453,7 @@ func shouldSuppressClosedChannelNotify(closeType channeldb.ClosureType,
 
 // newActiveChannelArbitrator creates a new instance of an active channel
 // arbitrator given the state of the target channel.
-func newActiveChannelArbitrator(channel *channeldb.OpenChannel,
+func newActiveChannelArbitrator(channel *chanstate.OpenChannel,
 	c *ChainArbitrator, chanEvents *ChainEventSubscription) (*ChannelArbitrator, error) {
 
 	// TODO(roasbeef): fetch best height (or pass in) so can ensure block
@@ -513,7 +519,7 @@ func newActiveChannelArbitrator(channel *channeldb.OpenChannel,
 				tx, c.cfg.ChainHash, &chanPoint, report,
 			)
 		},
-		FetchHistoricalChannel: func() (*channeldb.OpenChannel, error) {
+		FetchHistoricalChannel: func() (*chanstate.OpenChannel, error) {
 			chanStateDB := c.chanSource.ChannelStateDB()
 			return chanStateDB.FetchHistoricalChannel(&chanPoint)
 		},
@@ -565,7 +571,7 @@ func newActiveChannelArbitrator(channel *channeldb.OpenChannel,
 
 // getArbChannel returns an open channel wrapper for use by channel arbitrators.
 func (c *ChainArbitrator) getArbChannel(
-	channel *channeldb.OpenChannel) *arbChannel {
+	channel *chanstate.OpenChannel) *arbChannel {
 
 	return &arbChannel{
 		channel: channel,
@@ -873,7 +879,7 @@ func (c *ChainArbitrator) notifyChannelResolved(cp wire.OutPoint) {
 // transactions and republish them. This helps ensure propagation of the
 // transactions in the event that prior publications failed.
 func (c *ChainArbitrator) republishClosingTxs(
-	channel *channeldb.OpenChannel) error {
+	channel *chanstate.OpenChannel) error {
 
 	// If the channel has had its unilateral close broadcasted already,
 	// republish it in case it didn't propagate.
@@ -905,7 +911,7 @@ func (c *ChainArbitrator) republishClosingTxs(
 //
 // NOTE: There is no risk to calling this method if the channel isn't in either
 // CommitmentBroadcasted or CoopBroadcasted, but the logs will be misleading.
-func (c *ChainArbitrator) rebroadcast(channel *channeldb.OpenChannel,
+func (c *ChainArbitrator) rebroadcast(channel *chanstate.OpenChannel,
 	state channeldb.ChannelStatus) error {
 
 	chanPoint := channel.FundingOutpoint
@@ -1164,7 +1170,9 @@ func (c *ChainArbitrator) ForceCloseContract(chanPoint wire.OutPoint) (*wire.Msg
 // ChannelArbitrator tasked with watching over a new channel. Once a new
 // channel has finished its final funding flow, it should be registered with
 // the ChainArbitrator so we can properly react to any on-chain events.
-func (c *ChainArbitrator) WatchNewChannel(newChan *channeldb.OpenChannel) error {
+func (c *ChainArbitrator) WatchNewChannel(
+	newChan *chanstate.OpenChannel) error {
+
 	c.Lock()
 	defer c.Unlock()
 
@@ -1449,7 +1457,7 @@ func (c *ChainArbitrator) loadPendingCloseChannels() error {
 					tx, c.cfg.ChainHash, &chanPoint, report,
 				)
 			},
-			FetchHistoricalChannel: func() (*channeldb.OpenChannel, error) {
+			FetchHistoricalChannel: func() (*chanstate.OpenChannel, error) {
 				return chanStateDB.FetchHistoricalChannel(&chanPoint)
 			},
 			FindOutgoingHTLCDeadline: func(

@@ -6,11 +6,12 @@ import (
 	"io"
 	"sync"
 
-	"github.com/btcsuite/btcd/btcutil"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcd/txscript"
-	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcd/txscript/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/lightningnetwork/lnd/channeldb"
+	"github.com/lightningnetwork/lnd/chanstate"
 	"github.com/lightningnetwork/lnd/fn/v2"
 	"github.com/lightningnetwork/lnd/graph/db/models"
 	"github.com/lightningnetwork/lnd/input"
@@ -384,7 +385,7 @@ func (h *htlcSuccessResolver) HtlcPoint() wire.OutPoint {
 // production taproot channels after restart.
 //
 // NOTE: Part of the ContractResolver interface.
-func (h *htlcSuccessResolver) SupplementState(state *channeldb.OpenChannel) {
+func (h *htlcSuccessResolver) SupplementState(state *chanstate.OpenChannel) {
 	h.htlcLeaseResolver.SupplementState(state)
 	h.chanType = state.ChanType
 }

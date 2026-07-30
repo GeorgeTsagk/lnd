@@ -10,18 +10,20 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/schnorr/musig2"
-	"github.com/btcsuite/btcd/btcutil"
-	"github.com/btcsuite/btcd/btcutil/psbt"
-	"github.com/btcsuite/btcd/btcutil/txsort"
-	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcd/txscript"
-	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/btcutil/v2/txsort"
+	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcd/psbt/v2"
+	"github.com/btcsuite/btcd/txscript/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/wallet"
 	"github.com/lightningnetwork/lnd/channeldb"
+	"github.com/lightningnetwork/lnd/chanstate"
 	"github.com/lightningnetwork/lnd/fn/v2"
 	"github.com/lightningnetwork/lnd/input"
 	"github.com/lightningnetwork/lnd/keychain"
@@ -334,7 +336,7 @@ type addCounterPartySigsMsg struct {
 
 	// This channel is used to return the completed channel after the wallet
 	// has completed all of its stages in the funding process.
-	completeChan chan *channeldb.OpenChannel
+	completeChan chan *chanstate.OpenChannel
 
 	// NOTE: In order to avoid deadlocks, this channel MUST be buffered.
 	err chan error
@@ -363,7 +365,7 @@ type addSingleFunderSigsMsg struct {
 
 	// This channel is used to return the completed channel after the wallet
 	// has completed all of its stages in the funding process.
-	completeChan chan *channeldb.OpenChannel
+	completeChan chan *chanstate.OpenChannel
 
 	// NOTE: In order to avoid deadlocks, this channel MUST be buffered.
 	err chan error
@@ -977,7 +979,7 @@ func (l *LightningWallet) handleFundingReserveRequest(req *InitFundingReserveMsg
 			MinConfs:     req.MinConfs,
 			SubtractFees: req.SubtractFees,
 			FeeRate:      req.FundingFeePerKw,
-			ChangeAddr: func() (btcutil.Address, error) {
+			ChangeAddr: func() (address.Address, error) {
 				return l.NewAddress(
 					TaprootPubkey, true, DefaultAccountName,
 				)
@@ -1151,7 +1153,7 @@ func (l *LightningWallet) CurrentNumAnchorChans() (int, error) {
 	}
 
 	var numAnchors int
-	cntChannel := func(c *channeldb.OpenChannel) {
+	cntChannel := func(c *chanstate.OpenChannel) {
 		// We skip private channels, as we assume they won't be used
 		// for routing.
 		if c.ChannelFlags&lnwire.FFAnnounceChannel == 0 {
@@ -2600,7 +2602,7 @@ func initStateHints(commit1, commit2 *wire.MsgTx,
 // ValidateChannel will attempt to fully validate a newly mined channel, given
 // its funding transaction and existing channel state. If this method returns
 // an error, then the mined channel is invalid, and shouldn't be used.
-func (l *LightningWallet) ValidateChannel(channelState *channeldb.OpenChannel,
+func (l *LightningWallet) ValidateChannel(channelState *chanstate.OpenChannel,
 	fundingTx *wire.MsgTx) error {
 
 	var chanOpts []ChannelOpt

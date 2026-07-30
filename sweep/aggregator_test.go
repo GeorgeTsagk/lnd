@@ -5,9 +5,9 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/btcsuite/btcd/btcutil"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/lightningnetwork/lnd/fn/v2"
 	"github.com/lightningnetwork/lnd/input"
 	"github.com/lightningnetwork/lnd/lntypes"
@@ -162,6 +162,112 @@ func TestBudgetAggregatorFilterInputs(t *testing.T) {
 	// be included.
 	require.Contains(t, result, opEqual)
 	require.Contains(t, result, opHigh)
+}
+
+// TestBudgetAggregatorFilterInputsAuxBudget checks that the aux sweeper's
+// extra budget is folded into the filter's budget check, and that an aux
+// lookup failure falls back to gating on the input's own budget rather than
+// silently dropping the input.
+func TestBudgetAggregatorFilterInputsAuxBudget(t *testing.T) {
+	t.Parallel()
+
+	const wu lntypes.WeightUnit = 100
+	inpSize := lntypes.VByte(input.InputSize).ToWU() + wu
+
+	const minFeeRate = chainfee.SatPerKWeight(1000)
+	minFee := minFeeRate.FeeForWeight(inpSize)
+
+	// shortfall is how much the own budget falls short of minFee; the aux
+	// sweeper covers exactly this gap in the "rescue" cases.
+	const shortfall = btcutil.Amount(100)
+	auxErr := errors.New("aux failure")
+
+	testCases := []struct {
+		name       string
+		ownBudget  btcutil.Amount
+		auxResult  fn.Result[btcutil.Amount]
+		expectKept bool
+	}{
+		{
+			// The input's own budget falls short of the min fee,
+			// but the aux sweeper contributes enough extra budget
+			// to clear it. Pre-fix this input would have been
+			// filtered out.
+			name:       "aux budget rescues low-own-budget input",
+			ownBudget:  minFee - shortfall,
+			auxResult:  fn.Ok(shortfall),
+			expectKept: true,
+		},
+		{
+			// The aux lookup errors but the input's own budget
+			// already covers the min fee, so the conservative
+			// fallback (extraBudget=0) keeps it in. Pre-fix this
+			// input would have been silently dropped.
+			name:       "aux error keeps sufficient input",
+			ownBudget:  minFee,
+			auxResult:  fn.Err[btcutil.Amount](auxErr),
+			expectKept: true,
+		},
+		{
+			// The aux lookup errors and the input cannot pay its
+			// own way, so it is correctly filtered.
+			name:       "aux error drops below-min-fee input",
+			ownBudget:  minFee - shortfall,
+			auxResult:  fn.Err[btcutil.Amount](auxErr),
+			expectKept: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			estimator := &chainfee.MockEstimator{}
+			defer estimator.AssertExpectations(t)
+			estimator.On("RelayFeePerKW").Return(minFeeRate).Once()
+
+			wt := &input.MockWitnessType{}
+			defer wt.AssertExpectations(t)
+			wt.On("SizeUpperBound").Return(wu, true, nil).Once()
+
+			mockInput := &input.MockInput{}
+			defer mockInput.AssertExpectations(t)
+			op := wire.OutPoint{Hash: chainhash.Hash{1}}
+			mockInput.On("WitnessType").Return(wt)
+			mockInput.On("OutPoint").Return(op)
+
+			// Stub RequiredTxOut unconditionally so a regression
+			// that lets the dropped case fall through to the dust
+			// check surfaces as a clean assertion failure rather
+			// than an unstubbed-mock panic. `Maybe()` is needed
+			// because the dropped case shouldn't actually reach
+			// this call.
+			mockInput.On("RequiredTxOut").Return(nil).Maybe()
+
+			mockAux := &MockAuxSweeper{}
+			defer mockAux.AssertExpectations(t)
+			mockAux.On("ExtraBudgetForInputs").Return(tc.auxResult)
+
+			inputs := InputsMap{
+				op: &SweeperInput{
+					Input:  mockInput,
+					params: Params{Budget: tc.ownBudget},
+				},
+			}
+
+			b := NewBudgetAggregator(
+				estimator, 0,
+				fn.Some[AuxSweeper](mockAux),
+			)
+			result := b.filterInputs(inputs)
+
+			if tc.expectKept {
+				require.Contains(t, result, op)
+			} else {
+				require.NotContains(t, result, op)
+			}
+		})
+	}
 }
 
 // TestBudgetAggregatorSortInputs checks that inputs are sorted by based on

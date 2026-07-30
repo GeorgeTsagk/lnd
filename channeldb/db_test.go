@@ -11,9 +11,9 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/btcec/v2"
-	"github.com/btcsuite/btcd/btcutil"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/lightningnetwork/lnd/graph/db/models"
 	"github.com/lightningnetwork/lnd/keychain"
 	"github.com/lightningnetwork/lnd/kvdb"
@@ -307,33 +307,37 @@ func genRandomChannelShell() (*ChannelShell, error) {
 		CsvDelay: uint16(rand.Int63()),
 	}
 
+	channel := &OpenChannel{
+		ChainHash:       rev,
+		FundingOutpoint: chanPoint,
+		ShortChannelID: lnwire.NewShortChanIDFromInt(
+			uint64(rand.Int63()),
+		),
+		IdentityPub: pub,
+		LocalChanCfg: ChannelConfig{
+			CommitmentParams: commitParams,
+			PaymentBasePoint: keychain.KeyDescriptor{
+				KeyLocator: keychain.KeyLocator{
+					Family: keychain.KeyFamily(
+						rand.Int63(),
+					),
+					Index: uint32(rand.Int63()),
+				},
+			},
+		},
+		RemoteCurrentRevocation: pub,
+		IsPending:               false,
+		RevocationStore:         shachain.NewRevocationStore(),
+		RevocationProducer:      shaChainProducer,
+	}
+	channel.SetChannelStatusForStore(chanStatus)
+
 	return &ChannelShell{
 		NodeAddrs: []net.Addr{&net.TCPAddr{
 			IP:   net.ParseIP("127.0.0.1"),
 			Port: 18555,
 		}},
-		Chan: &OpenChannel{
-			chanStatus:      chanStatus,
-			ChainHash:       rev,
-			FundingOutpoint: chanPoint,
-			ShortChannelID: lnwire.NewShortChanIDFromInt(
-				uint64(rand.Int63()),
-			),
-			IdentityPub: pub,
-			LocalChanCfg: ChannelConfig{
-				CommitmentParams: commitParams,
-				PaymentBasePoint: keychain.KeyDescriptor{
-					KeyLocator: keychain.KeyLocator{
-						Family: keychain.KeyFamily(rand.Int63()),
-						Index:  uint32(rand.Int63()),
-					},
-				},
-			},
-			RemoteCurrentRevocation: pub,
-			IsPending:               false,
-			RevocationStore:         shachain.NewRevocationStore(),
-			RevocationProducer:      shaChainProducer,
-		},
+		Chan: channel,
 	}, nil
 }
 
@@ -403,7 +407,7 @@ func TestRestoreChannelShells(t *testing.T) {
 	}
 	if !nodeChans[0].HasChanStatus(ChanStatusRestored) {
 		t.Fatalf("node has wrong status flags: %v",
-			nodeChans[0].chanStatus)
+			nodeChans[0].ChanStatus())
 	}
 
 	// We should also be able to find the channel if we query for it

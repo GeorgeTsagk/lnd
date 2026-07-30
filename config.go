@@ -20,8 +20,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/btcsuite/btcd/btcutil"
-	"github.com/btcsuite/btcd/chaincfg"
+	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/chaincfg/v2"
 	flags "github.com/jessevdk/go-flags"
 	"github.com/lightninglabs/neutrino"
 	"github.com/lightningnetwork/lnd/autopilot"
@@ -263,6 +263,58 @@ const (
 	// response in time after we send a ping.
 	defaultNoDisconnectOnPongFailure = false
 )
+
+// validateMaxOutgoingCltvExpiry validates the configured maximum outgoing CLTV
+// expiry against the node's default time lock delta.
+func validateMaxOutgoingCltvExpiry(maxCltvExpiry, timeLockDelta uint32) error {
+	if maxCltvExpiry < timeLockDelta {
+		return fmt.Errorf(
+			"max-cltv-expiry must be at least %v", timeLockDelta,
+		)
+	}
+
+	if maxCltvExpiry > MaxTimeLockDelta {
+		return fmt.Errorf(
+			"max-cltv-expiry must be at most %v", MaxTimeLockDelta,
+		)
+	}
+
+	return nil
+}
+
+// validateCltvDeltaBounds validates a CLTV delta against LND's absolute
+// supported bounds.
+func validateCltvDeltaBounds(delta uint32) error {
+	if delta < minTimeLockDelta {
+		return fmt.Errorf("time lock delta of %v is too small, "+
+			"minimum supported is %v", delta, minTimeLockDelta)
+	}
+
+	if delta > MaxTimeLockDelta {
+		return fmt.Errorf("time lock delta of %v is too big, "+
+			"maximum supported is %v", delta, MaxTimeLockDelta)
+	}
+
+	return nil
+}
+
+// validateChannelPolicyTimeLockDelta validates an advertised channel policy
+// time lock delta against the node's supported forwarding bounds.
+func validateChannelPolicyTimeLockDelta(timeLockDelta,
+	maxOutgoingCltvExpiry uint32) error {
+
+	if err := validateCltvDeltaBounds(timeLockDelta); err != nil {
+		return err
+	}
+
+	if timeLockDelta > maxOutgoingCltvExpiry {
+		return fmt.Errorf("time lock delta of %v exceeds "+
+			"max-cltv-expiry of %v", timeLockDelta,
+			maxOutgoingCltvExpiry)
+	}
+
+	return nil
+}
 
 var (
 	// DefaultLndDir is the default directory where lnd tries to find its
@@ -1196,6 +1248,12 @@ func ValidateConfig(cfg Config, interceptor signal.Interceptor, fileParser,
 		return nil, mkErr("invalid max commit fee rate anchors: %v, "+
 			"must be at least 1 sat/vByte",
 			cfg.MaxCommitFeeRateAnchors)
+	}
+
+	if err := validateMaxOutgoingCltvExpiry(
+		cfg.MaxOutgoingCltvExpiry, cfg.Bitcoin.TimeLockDelta,
+	); err != nil {
+		return nil, mkErr("%v", err)
 	}
 
 	// Validate the Tor config parameters.

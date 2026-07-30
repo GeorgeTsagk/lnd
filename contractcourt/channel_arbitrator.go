@@ -10,12 +10,13 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/btcsuite/btcd/btcutil"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcd/txscript"
-	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcd/txscript/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/lightningnetwork/lnd/chainio"
 	"github.com/lightningnetwork/lnd/channeldb"
+	"github.com/lightningnetwork/lnd/chanstate"
 	"github.com/lightningnetwork/lnd/fn/v2"
 	"github.com/lightningnetwork/lnd/graph/db/models"
 	"github.com/lightningnetwork/lnd/htlcswitch/hop"
@@ -166,7 +167,7 @@ type ChannelArbitratorConfig struct {
 	// FetchHistoricalChannel retrieves the historical state of a channel.
 	// This is mostly used to supplement the ContractResolvers with
 	// additional information required for proper contract resolution.
-	FetchHistoricalChannel func() (*channeldb.OpenChannel, error)
+	FetchHistoricalChannel func() (*chanstate.OpenChannel, error)
 
 	// FindOutgoingHTLCDeadline returns the deadline in absolute block
 	// height for the specified outgoing HTLC. For an outgoing HTLC, its
@@ -730,7 +731,7 @@ func (c *ChannelArbitrator) relaunchResolvers(commitSet *CommitSet,
 	// We'll also fetch the historical state of this channel, as it should
 	// have been marked as closed by now, and supplement it to each resolver
 	// such that we can properly resolve our pending contracts.
-	var chanState *channeldb.OpenChannel
+	var chanState *chanstate.OpenChannel
 	chanState, err = c.cfg.FetchHistoricalChannel()
 	switch {
 	// If we don't find this channel, then it may be the case that it
@@ -1432,7 +1433,7 @@ func (c *ChannelArbitrator) sweepAnchors(anchors *lnwallet.AnchorResolutions,
 //     HTLCs,  or,
 //   - half of the least CLTV from incoming HTLCs if the preimage is available.
 //
-// We use half of the CTLV value to ensure that we have enough time to sweep
+// We use half of the CLTV value to ensure that we have enough time to sweep
 // the second-level HTLCs.
 //
 // It also finds the total value that are time-sensitive, which is the sum of
@@ -2359,7 +2360,7 @@ func (c *ChannelArbitrator) prepContractResolutions(
 	// We'll also fetch the historical state of this channel, as it should
 	// have been marked as closed by now, and supplement it to each resolver
 	// such that we can properly resolve our pending contracts.
-	var chanState *channeldb.OpenChannel
+	var chanState *chanstate.OpenChannel
 	chanState, err := c.cfg.FetchHistoricalChannel()
 	switch {
 	// If we don't find this channel, then it may be the case that it

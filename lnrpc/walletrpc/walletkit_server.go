@@ -18,20 +18,22 @@ import (
 	"sort"
 	"time"
 
+	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/ecdsa"
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
-	"github.com/btcsuite/btcd/btcutil"
-	"github.com/btcsuite/btcd/btcutil/hdkeychain"
-	"github.com/btcsuite/btcd/btcutil/psbt"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcd/txscript"
-	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
+	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcd/psbt/v2"
+	"github.com/btcsuite/btcd/txscript/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	base "github.com/btcsuite/btcwallet/wallet"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
 	"github.com/lightningnetwork/lnd/channeldb"
+	"github.com/lightningnetwork/lnd/chanstate"
 	"github.com/lightningnetwork/lnd/contractcourt"
 	"github.com/lightningnetwork/lnd/fn/v2"
 	"github.com/lightningnetwork/lnd/input"
@@ -90,6 +92,10 @@ var (
 			Action: "read",
 		}},
 		"/walletrpc.WalletKit/PublishTransaction": {{
+			Entity: "onchain",
+			Action: "write",
+		}},
+		"/walletrpc.WalletKit/SubmitPackage": {{
 			Entity: "onchain",
 			Action: "write",
 		}},
@@ -695,6 +701,87 @@ func (w *WalletKit) PublishTransaction(ctx context.Context,
 	return &PublishResponse{}, nil
 }
 
+// maxPackageTxns is the maximum number of transactions accepted in a single
+// SubmitPackage request. It mirrors bitcoind's MAX_PACKAGE_COUNT (the limit
+// its submitpackage RPC enforces), so any package the backend could accept
+// fits, while bounding the work an authenticated caller can force from
+// deserializing an arbitrarily long raw_txs list.
+const maxPackageTxns = 25
+
+// SubmitPackage submits a package of related transactions (topologically
+// sorted, unconfirmed parents first and the child last) to the wallet's chain
+// backend for atomic validation and acceptance. This lets a zero-fee v3/TRUC
+// parent confirm via its fee-paying CPFP child without the caller needing a
+// separate connection to the chain backend.
+func (w *WalletKit) SubmitPackage(_ context.Context,
+	req *SubmitPackageRequest) (*SubmitPackageResponse, error) {
+
+	if len(req.RawTxs) == 0 {
+		return nil, fmt.Errorf("must provide at least one transaction")
+	}
+	if len(req.RawTxs) > maxPackageTxns {
+		return nil, fmt.Errorf("package of %d transactions exceeds "+
+			"the maximum of %d", len(req.RawTxs), maxPackageTxns)
+	}
+
+	txns := make([]*wire.MsgTx, 0, len(req.RawTxs))
+	for _, raw := range req.RawTxs {
+		tx := &wire.MsgTx{}
+		if err := tx.Deserialize(bytes.NewReader(raw)); err != nil {
+			return nil, fmt.Errorf("unable to decode tx: %w", err)
+		}
+
+		txns = append(txns, tx)
+	}
+
+	// Map the optional sat/vByte ceiling onto the backend. An unset value
+	// uses the node's default; an explicit value (including 0, meaning no
+	// limit) is passed through unchanged.
+	var maxFeeRate *chainfee.SatPerVByte
+	if req.SatPerVbyte != nil {
+		rate := chainfee.SatPerVByte(*req.SatPerVbyte)
+		maxFeeRate = &rate
+	}
+
+	result, err := w.cfg.Wallet.SubmitPackage(txns, maxFeeRate)
+	if err != nil {
+		return nil, err
+	}
+
+	// Some backends (e.g. the no-chain source or mocks) may return a nil
+	// result; guard against a nil dereference below.
+	if result == nil {
+		return nil, fmt.Errorf("nil result from wallet backend")
+	}
+
+	numResults := len(result.TxResults)
+	resp := &SubmitPackageResponse{
+		PackageMsg: result.PackageMsg,
+		TxResults:  make(map[string]*SubmitPackageTxResult, numResults),
+		ReplacedTransactions: make(
+			[]string, 0, len(result.ReplacedTransactions),
+		),
+	}
+	for _, replaced := range result.ReplacedTransactions {
+		resp.ReplacedTransactions = append(
+			resp.ReplacedTransactions, replaced.String(),
+		)
+	}
+	for wtxid, txResult := range result.TxResults {
+		entry := &SubmitPackageTxResult{Txid: txResult.TxID.String()}
+		if txResult.Error != nil {
+			entry.Error = *txResult.Error
+		}
+		if txResult.OtherWtxid != nil {
+			entry.OtherWtxid = txResult.OtherWtxid.String()
+		}
+
+		resp.TxResults[wtxid] = entry
+	}
+
+	return resp, nil
+}
+
 // RemoveTransaction attempts to remove the transaction and all of its
 // descendants resulting from further spends of the outputs of the provided
 // transaction id.
@@ -1184,7 +1271,7 @@ func (w *WalletKit) BumpFee(ctx context.Context,
 // getWaitingCloseChannel returns the waiting close channel in case it does
 // exist in the underlying channel state database.
 func (w *WalletKit) getWaitingCloseChannel(
-	chanPoint wire.OutPoint) (*channeldb.OpenChannel, error) {
+	chanPoint wire.OutPoint) (*chanstate.OpenChannel, error) {
 
 	// Fetch all channels, which still have their commitment transaction not
 	// confirmed (waiting close channels).
@@ -1193,7 +1280,7 @@ func (w *WalletKit) getWaitingCloseChannel(
 		return nil, err
 	}
 
-	channel := fn.Find(chans, func(c *channeldb.OpenChannel) bool {
+	channel := fn.Find(chans, func(c *chanstate.OpenChannel) bool {
 		return c.FundingOutpoint == chanPoint
 	})
 
@@ -1736,7 +1823,7 @@ func (w *WalletKit) FundPsbt(_ context.Context,
 
 		txOut := make([]*wire.TxOut, 0, len(tpl.Outputs))
 		for addrStr, amt := range tpl.Outputs {
-			addr, err := btcutil.DecodeAddress(
+			addr, err := address.DecodeAddress(
 				addrStr, w.cfg.ChainParams,
 			)
 			if err != nil {
@@ -2234,7 +2321,7 @@ func (w *WalletKit) handleChange(packet *psbt.Packet, changeIndex int32,
 	// address, which is required for some protocols (such as Taproot
 	// Assets).
 	pOut := psbt.POutput{}
-	_, isTaprootChangeAddr := changeAddr.(*btcutil.AddressTaproot)
+	_, isTaprootChangeAddr := changeAddr.(*address.AddressTaproot)
 	if isTaprootChangeAddr {
 		changeAddrInfo, err := w.cfg.Wallet.AddressInfo(changeAddr)
 		if err != nil {
@@ -2725,7 +2812,7 @@ const msgSignaturePrefix = "Bitcoin Signed Message:\n"
 func (w *WalletKit) SignMessageWithAddr(_ context.Context,
 	req *SignMessageWithAddrRequest) (*SignMessageWithAddrResponse, error) {
 
-	addr, err := btcutil.DecodeAddress(req.Addr, w.cfg.ChainParams)
+	addr, err := address.DecodeAddress(req.Addr, w.cfg.ChainParams)
 	if err != nil {
 		return nil, fmt.Errorf("unable to decode address: %w", err)
 	}
@@ -2812,65 +2899,65 @@ func (w *WalletKit) VerifyMessageWithAddr(_ context.Context,
 		serializedPubkey = pk.SerializeUncompressed()
 	}
 
-	addr, err := btcutil.DecodeAddress(req.Addr, w.cfg.ChainParams)
+	decodedAddr, err := address.DecodeAddress(req.Addr, w.cfg.ChainParams)
 	if err != nil {
 		return nil, fmt.Errorf("unable to decode address: %w", err)
 	}
 
-	if !addr.IsForNet(w.cfg.ChainParams) {
+	if !decodedAddr.IsForNet(w.cfg.ChainParams) {
 		return nil, fmt.Errorf("encoded address is for"+
 			"the wrong network %s", req.Addr)
 	}
 
 	var (
-		address    btcutil.Address
-		pubKeyHash = btcutil.Hash160(serializedPubkey)
+		addr       address.Address
+		pubKeyHash = address.Hash160(serializedPubkey)
 	)
 
 	// Ensure the address is one of the supported types.
-	switch addr.(type) {
-	case *btcutil.AddressPubKeyHash:
-		address, err = btcutil.NewAddressPubKeyHash(
+	switch decodedAddr.(type) {
+	case *address.AddressPubKeyHash:
+		addr, err = address.NewAddressPubKeyHash(
 			pubKeyHash, w.cfg.ChainParams,
 		)
 		if err != nil {
 			return nil, err
 		}
 
-	case *btcutil.AddressWitnessPubKeyHash:
-		address, err = btcutil.NewAddressWitnessPubKeyHash(
+	case *address.AddressWitnessPubKeyHash:
+		addr, err = address.NewAddressWitnessPubKeyHash(
 			pubKeyHash, w.cfg.ChainParams,
 		)
 		if err != nil {
 			return nil, err
 		}
 
-	case *btcutil.AddressScriptHash:
+	case *address.AddressScriptHash:
 		// Check if address is a Nested P2WKH (NP2WKH).
-		address, err = btcutil.NewAddressWitnessPubKeyHash(
+		addr, err = address.NewAddressWitnessPubKeyHash(
 			pubKeyHash, w.cfg.ChainParams,
 		)
 		if err != nil {
 			return nil, err
 		}
 
-		witnessScript, err := txscript.PayToAddrScript(address)
+		witnessScript, err := txscript.PayToAddrScript(addr)
 		if err != nil {
 			return nil, err
 		}
 
-		address, err = btcutil.NewAddressScriptHashFromHash(
-			btcutil.Hash160(witnessScript), w.cfg.ChainParams,
+		addr, err = address.NewAddressScriptHashFromHash(
+			address.Hash160(witnessScript), w.cfg.ChainParams,
 		)
 		if err != nil {
 			return nil, err
 		}
 
-	case *btcutil.AddressTaproot:
+	case *address.AddressTaproot:
 		// Only addresses without a tapscript are allowed because
 		// the verification is using the internal key.
 		tapKey := txscript.ComputeTaprootKeyNoScript(pk)
-		address, err = btcutil.NewAddressTaproot(
+		addr, err = address.NewAddressTaproot(
 			schnorr.SerializePubKey(tapKey),
 			w.cfg.ChainParams,
 		)
@@ -2883,7 +2970,7 @@ func (w *WalletKit) VerifyMessageWithAddr(_ context.Context,
 	}
 
 	return &VerifyMessageWithAddrResponse{
-		Valid:  req.Addr == address.EncodeAddress(),
+		Valid:  req.Addr == addr.EncodeAddress(),
 		Pubkey: serializedPubkey,
 	}, nil
 }

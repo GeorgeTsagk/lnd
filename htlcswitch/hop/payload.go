@@ -6,7 +6,7 @@ import (
 	"io"
 
 	"github.com/btcsuite/btcd/btcec/v2"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/chainhash/v2"
 	sphinx "github.com/lightningnetwork/lightning-onion"
 	"github.com/lightningnetwork/lnd/lnwire"
 	"github.com/lightningnetwork/lnd/record"
@@ -126,9 +126,11 @@ func NewLegacyPayload(f *sphinx.HopData) *Payload {
 
 	return &Payload{
 		FwdInfo: ForwardingInfo{
-			NextHop:         lnwire.NewShortChanIDFromInt(nextHop),
+			NextHop: NewChannelNextHop(
+				lnwire.NewShortChanIDFromInt(nextHop),
+			),
 			AmountToForward: lnwire.MilliSatoshi(f.ForwardAmount),
-			OutgoingCTLV:    f.OutgoingCltv,
+			OutgoingCLTV:    f.OutgoingCltv,
 		},
 		customRecords: make(record.CustomSet),
 	}
@@ -201,9 +203,11 @@ func ParseTLVPayload(r io.Reader) (*Payload, map[tlv.Type][]byte, error) {
 
 	return &Payload{
 		FwdInfo: ForwardingInfo{
-			NextHop:         lnwire.NewShortChanIDFromInt(cid),
+			NextHop: NewChannelNextHop(
+				lnwire.NewShortChanIDFromInt(cid),
+			),
 			AmountToForward: lnwire.MilliSatoshi(amt),
-			OutgoingCTLV:    cltv,
+			OutgoingCLTV:    cltv,
 		},
 		MPP:           mpp,
 		AMP:           amp,
