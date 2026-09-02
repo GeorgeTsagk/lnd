@@ -1,6 +1,7 @@
 package lnwallet
 
 import (
+	"context"
 	"encoding/hex"
 	"sync/atomic"
 	"time"
@@ -129,6 +130,13 @@ func (w *mockWalletController) RequiredReserve(uint32) btcutil.Amount {
 // ListAddresses currently returns a dummy value.
 func (w *mockWalletController) ListAddresses(string,
 	bool) (AccountAddressMap, error) {
+
+	return nil, nil
+}
+
+// CreateAccount currently returns a dummy value.
+func (w *mockWalletController) CreateAccount(waddrmgr.KeyScope,
+	string) (*waddrmgr.AccountProperties, error) {
 
 	return nil, nil
 }
@@ -309,6 +317,14 @@ func (w *mockWalletController) Start() error {
 // Stop currently does nothing.
 func (w *mockWalletController) Stop() error {
 	return nil
+}
+
+// ReadySignal currently signals that the wallet is ready instantly.
+func (w *mockWalletController) ReadySignal(_ context.Context) chan error {
+	readyChan := make(chan error, 1)
+	readyChan <- nil
+
+	return readyChan
 }
 
 func (w *mockWalletController) FetchTx(chainhash.Hash) (*wire.MsgTx, error) {

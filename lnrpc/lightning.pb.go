@@ -7331,8 +7331,9 @@ type BatchOpenChannel struct {
 	// pending channel ID to identify the channel while it is in the pre-pending
 	// state.
 	PendingChanId []byte `protobuf:"bytes,8,opt,name=pending_chan_id,json=pendingChanId,proto3" json:"pending_chan_id,omitempty"`
-	// The explicit commitment type to use. Note this field will only be used if
-	// the remote peer supports explicit channel negotiation.
+	// The commitment type to request. If UNKNOWN, lnd selects a default from
+	// both peers' supported features; the selected type is always sent
+	// explicitly.
 	CommitmentType CommitmentType `protobuf:"varint,9,opt,name=commitment_type,json=commitmentType,proto3,enum=lnrpc.CommitmentType" json:"commitment_type,omitempty"`
 	// The maximum amount of coins in millisatoshi that can be pending within
 	// the channel. It only applies to the remote party.
@@ -7655,8 +7656,9 @@ type OpenChannelRequest struct {
 	// Max local csv is the maximum csv delay we will allow for our own commitment
 	// transaction.
 	MaxLocalCsv uint32 `protobuf:"varint,17,opt,name=max_local_csv,json=maxLocalCsv,proto3" json:"max_local_csv,omitempty"`
-	// The explicit commitment type to use. Note this field will only be used if
-	// the remote peer supports explicit channel negotiation.
+	// The commitment type to request. If UNKNOWN, lnd selects a default from
+	// both peers' supported features; the selected type is always sent
+	// explicitly.
 	CommitmentType CommitmentType `protobuf:"varint,18,opt,name=commitment_type,json=commitmentType,proto3,enum=lnrpc.CommitmentType" json:"commitment_type,omitempty"`
 	// If this is true, then a zero-conf channel open will be attempted.
 	ZeroConf bool `protobuf:"varint,19,opt,name=zero_conf,json=zeroConf,proto3" json:"zero_conf,omitempty"`
@@ -14624,23 +14626,52 @@ func (x *PayReqString) GetPayReq() string {
 }
 
 type PayReq struct {
-	state           protoimpl.MessageState `protogen:"open.v1"`
-	Destination     string                 `protobuf:"bytes,1,opt,name=destination,proto3" json:"destination,omitempty"`
-	PaymentHash     string                 `protobuf:"bytes,2,opt,name=payment_hash,json=paymentHash,proto3" json:"payment_hash,omitempty"`
-	NumSatoshis     int64                  `protobuf:"varint,3,opt,name=num_satoshis,json=numSatoshis,proto3" json:"num_satoshis,omitempty"`
-	Timestamp       int64                  `protobuf:"varint,4,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
-	Expiry          int64                  `protobuf:"varint,5,opt,name=expiry,proto3" json:"expiry,omitempty"`
-	Description     string                 `protobuf:"bytes,6,opt,name=description,proto3" json:"description,omitempty"`
-	DescriptionHash string                 `protobuf:"bytes,7,opt,name=description_hash,json=descriptionHash,proto3" json:"description_hash,omitempty"`
-	FallbackAddr    string                 `protobuf:"bytes,8,opt,name=fallback_addr,json=fallbackAddr,proto3" json:"fallback_addr,omitempty"`
-	CltvExpiry      int64                  `protobuf:"varint,9,opt,name=cltv_expiry,json=cltvExpiry,proto3" json:"cltv_expiry,omitempty"`
-	RouteHints      []*RouteHint           `protobuf:"bytes,10,rep,name=route_hints,json=routeHints,proto3" json:"route_hints,omitempty"`
-	PaymentAddr     []byte                 `protobuf:"bytes,11,opt,name=payment_addr,json=paymentAddr,proto3" json:"payment_addr,omitempty"`
-	NumMsat         int64                  `protobuf:"varint,12,opt,name=num_msat,json=numMsat,proto3" json:"num_msat,omitempty"`
-	Features        map[uint32]*Feature    `protobuf:"bytes,13,rep,name=features,proto3" json:"features,omitempty" protobuf_key:"varint,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	BlindedPaths    []*BlindedPaymentPath  `protobuf:"bytes,14,rep,name=blinded_paths,json=blindedPaths,proto3" json:"blinded_paths,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The hex-encoded compressed public key of the payment request signer. For
+	// non-blinded payment requests, this is the payee's node public key.
+	Destination string `protobuf:"bytes,1,opt,name=destination,proto3" json:"destination,omitempty"`
+	// The hex-encoded payment hash (BOLT-11 `p` field).
+	PaymentHash string `protobuf:"bytes,2,opt,name=payment_hash,json=paymentHash,proto3" json:"payment_hash,omitempty"`
+	// The amount in satoshis. 0 if the payment request does not specify an
+	// amount. Any millisatoshi remainder is truncated; see `num_msat` for the
+	// exact value.
+	NumSatoshis int64 `protobuf:"varint,3,opt,name=num_satoshis,json=numSatoshis,proto3" json:"num_satoshis,omitempty"`
+	// The creation time of the payment request as a Unix timestamp (seconds).
+	Timestamp int64 `protobuf:"varint,4,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
+	// The expiry duration in seconds relative to the `timestamp` field. If
+	// the payment request omits the BOLT-11 `x` expiry field, the BOLT-11
+	// default of 3600 seconds is returned.
+	Expiry int64 `protobuf:"varint,5,opt,name=expiry,proto3" json:"expiry,omitempty"`
+	// The description (memo) of the payment (BOLT-11 `d` field). Empty if the
+	// payment request carries a description hash instead.
+	Description string `protobuf:"bytes,6,opt,name=description,proto3" json:"description,omitempty"`
+	// The hex-encoded SHA-256 hash of the payment description (BOLT-11 `h`
+	// field). Empty if not present.
+	DescriptionHash string `protobuf:"bytes,7,opt,name=description_hash,json=descriptionHash,proto3" json:"description_hash,omitempty"`
+	// The on-chain fallback address (BOLT-11 `f` field), encoded for the active
+	// network. Empty if not present.
+	FallbackAddr string `protobuf:"bytes,8,opt,name=fallback_addr,json=fallbackAddr,proto3" json:"fallback_addr,omitempty"`
+	// The minimum CLTV expiry delta for the final hop (BOLT-11 `c` field). If
+	// the payment request omits it, `zpay32.DefaultAssumedFinalCLTVDelta` is
+	// returned. This field is ignored for blinded payment paths.
+	CltvExpiry int64 `protobuf:"varint,9,opt,name=cltv_expiry,json=cltvExpiry,proto3" json:"cltv_expiry,omitempty"`
+	// Route hints that can each be individually used to assist in reaching the
+	// payment request's destination (BOLT-11 `r` field).
+	RouteHints []*RouteHint `protobuf:"bytes,10,rep,name=route_hints,json=routeHints,proto3" json:"route_hints,omitempty"`
+	// The payment address, also known as the payment secret (BOLT-11 `s`
+	// field). This value is used in MPP payments and required by newer payment
+	// requests. It is 32 zero bytes if not present. When using REST, this field
+	// is base64 encoded.
+	PaymentAddr []byte `protobuf:"bytes,11,opt,name=payment_addr,json=paymentAddr,proto3" json:"payment_addr,omitempty"`
+	// The amount in millisatoshis. 0 if the payment request does not specify an
+	// amount.
+	NumMsat int64 `protobuf:"varint,12,opt,name=num_msat,json=numMsat,proto3" json:"num_msat,omitempty"`
+	// The feature bits advertised in the payment request (BOLT-11 `9` field).
+	Features map[uint32]*Feature `protobuf:"bytes,13,rep,name=features,proto3" json:"features,omitempty" protobuf_key:"varint,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	// The blinded payment paths included in the payment request, if any.
+	BlindedPaths  []*BlindedPaymentPath `protobuf:"bytes,14,rep,name=blinded_paths,json=blindedPaths,proto3" json:"blinded_paths,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *PayReq) Reset() {

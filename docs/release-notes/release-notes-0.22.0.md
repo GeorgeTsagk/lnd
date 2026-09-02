@@ -27,14 +27,6 @@
   [clarifies](https://github.com/lightningnetwork/lnd/issues/10568) the ZMQ
   port-mismatch warnings so they no longer suggest that the connection failed.
 
-* [Fixed a bug](https://github.com/lightningnetwork/lnd/pull/10782)
-  that could be encountered during co-op closes whereby
-  `ChanStatusCoopBroadcasted` was set before a close transaction
-  actually existed. As a side effect, channels in shutdown
-  negotiation now remain in `ListChannels` (as inactive) until
-  the close transaction is actually broadcast, and
-  `WaitingCloseChannel.ClosingTx` is never empty.
-
 * [Fixed a bug](https://github.com/lightningnetwork/lnd/pull/10890)
   where `ListChannels` reported 100% `uptime` for channels whose peer
   was offline. The channel fitness store assumed a peer was online when
@@ -109,6 +101,13 @@
   later in the reservation flow as a funder-balance-dust error; they now
   surface a clearer, spec-aligned error string up front.
 
+* [Require an explicit `channel_type` during channel
+  funding](https://github.com/lightningnetwork/lnd/pull/11064). It is now always
+  set in `open_channel` and echoed back in `accept_channel`, and an
+  `open_channel` that omits it is rejected. Implicit commitment type negotiation
+  is removed; if the RPC caller doesn't request a type, a default is derived
+  from both peers' features and signaled explicitly.
+
 ## BOLT 12 (Offers)
 
 * [Initial BOLT 12 Offer codec](https://github.com/lightningnetwork/lnd/pull/10789):
@@ -134,7 +133,15 @@
   codec](https://github.com/lightningnetwork/lnd/pull/10958): add the
   `invoice_error` TLV message to `bolt12/` for onion-message replies.
 
+* [BOLT 12 string codec](https://github.com/lightningnetwork/lnd/pull/11001):
+  add checksumless bech32 encoding/decoding for BOLT 12 `lno`, `lnr`, and `lni`
+  strings with continuation line handling.
+
 ## Testing
+
+* [BOLT 12 spec test vectors](https://github.com/lightningnetwork/lnd/pull/11001):
+  add spec test vectors for offer decoding and format string parsing in
+  `bolt12/test-vectors/`.
 
 ## Database
 
@@ -159,3 +166,4 @@
 * Boris Nagaev
 * Erick Cestari
 * Jared Tobin
+* Nishant Bansal
