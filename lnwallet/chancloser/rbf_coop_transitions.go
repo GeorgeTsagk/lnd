@@ -25,7 +25,7 @@ import (
 )
 
 var (
-	// ErrInvalidStateTransition is returned if the remote party tries to
+	// ErrThawHeightNotReached is returned if the remote party tries to
 	// close, but the thaw height hasn't been matched yet.
 	ErrThawHeightNotReached = fmt.Errorf("thaw height not reached")
 )
@@ -613,7 +613,7 @@ func (c *ChannelFlushing) ProcessEvent(event ProtocolEvent, env *Environment,
 		// we'd propose.
 		localTxOut, remoteTxOut := closeTerms.DeriveCloseTxOuts()
 		absoluteFee := env.FeeEstimator.EstimateFee(
-			env.ChanType, localTxOut, remoteTxOut,
+			env.ChanType, localTxOut, remoteTxOut, nil,
 			idealFeeRate.FeePerKWeight(),
 		)
 
@@ -1135,7 +1135,7 @@ func (l *LocalCloseStart) ProcessEvent(event ProtocolEvent, env *Environment,
 		// First, we'll figure out the absolute fee rate we should pay
 		localTxOut, remoteTxOut := l.DeriveCloseTxOuts()
 		absoluteFee := env.FeeEstimator.EstimateFee(
-			env.ChanType, localTxOut, remoteTxOut,
+			env.ChanType, localTxOut, remoteTxOut, nil,
 			msg.TargetFeeRate.FeePerKWeight(),
 		)
 

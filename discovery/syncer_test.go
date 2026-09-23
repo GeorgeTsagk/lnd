@@ -1099,9 +1099,55 @@ func TestGossipSyncerReplyChanRangeQuery(t *testing.T) {
 	}
 }
 
-// TestGossipSyncerReplyChanRangeQuery tests a variety of
-// QueryChannelRange messages to ensure the underlying queries are
-// executed with the correct block range.
+// TestGossipSyncerReplyChanRangeQueryDenseFirstBlock tests that a dense first
+// block does not cause a zero-block reply to be sent before the final reply.
+func TestGossipSyncerReplyChanRangeQueryDenseFirstBlock(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+
+	const (
+		chunkSize           = 2
+		startingBlockHeight = 100
+		numBlocks           = 50
+	)
+
+	msgChan, syncer, chanSeries := newTestSyncer(
+		lnwire.NewShortChanIDFromInt(10), defaultEncoding, chunkSize,
+	)
+	query := &lnwire.QueryChannelRange{
+		FirstBlockHeight: startingBlockHeight,
+		NumBlocks:        numBlocks,
+	}
+	chanSeries.filterRangeResp <- []lnwire.ShortChannelID{
+		{BlockHeight: startingBlockHeight, TxIndex: 1},
+		{BlockHeight: startingBlockHeight, TxIndex: 2},
+		{BlockHeight: startingBlockHeight, TxIndex: 3},
+	}
+
+	require.NoError(t, syncer.replyChanRangeQuery(ctx, query))
+
+	msg := <-msgChan
+	require.Len(t, msg, 1)
+	reply, ok := msg[0].(*lnwire.ReplyChannelRange)
+	require.True(t, ok)
+	require.Equal(t, uint32(startingBlockHeight), reply.FirstBlockHeight)
+	require.Equal(t, uint32(numBlocks), reply.NumBlocks)
+	require.Equal(t, uint8(1), reply.Complete)
+	require.Len(t, reply.ShortChanIDs, chunkSize)
+	for _, scid := range reply.ShortChanIDs {
+		require.Equal(t, uint32(startingBlockHeight), scid.BlockHeight)
+	}
+
+	select {
+	case extraMsg := <-msgChan:
+		t.Fatalf("unexpected extra reply: %v", extraMsg)
+	default:
+	}
+}
+
+// TestGossipSyncerReplyChanRangeQueryBlockRange tests a variety of
+// QueryChannelRange messages to ensure the underlying queries are executed
+// with the correct block range.
 func TestGossipSyncerReplyChanRangeQueryBlockRange(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
@@ -1132,6 +1178,18 @@ func TestGossipSyncerReplyChanRangeQueryBlockRange(t *testing.T) {
 			FirstBlockHeight: uint32(1000),
 			NumBlocks:        uint32(math.MaxUint32),
 		},
+
+		// zero-block range at the genesis block
+		{
+			FirstBlockHeight: uint32(0),
+			NumBlocks:        uint32(0),
+		},
+
+		// zero-block range after the genesis block
+		{
+			FirstBlockHeight: uint32(1000),
+			NumBlocks:        uint32(0),
+		},
 	}
 
 	// Next construct the expected filterRangeReq startHeight and endHeight
@@ -1148,6 +1206,14 @@ func TestGossipSyncerReplyChanRangeQueryBlockRange(t *testing.T) {
 		{
 			startHeight: uint32(1000),
 			endHeight:   uint32(math.MaxUint32),
+		},
+		{
+			startHeight: uint32(0),
+			endHeight:   uint32(0),
+		},
+		{
+			startHeight: uint32(1000),
+			endHeight:   uint32(1000),
 		},
 	}
 
@@ -1818,7 +1884,10 @@ func queryBatch(t *testing.T,
 			case <-time.After(time.Second * 2):
 				t.Fatalf("node 2 didn't read msg")
 
-			case syncer1.gossipMsgs <- msg:
+			case syncer1.gossipMsgs <- replyEnvelope{
+				gen: syncer1.chanRangeQueryGen.Load(),
+				msg: msg,
+			}:
 			}
 		}
 	}
@@ -1919,7 +1988,10 @@ func TestGossipSyncerRoutineSync(t *testing.T) {
 				case <-time.After(time.Second * 2):
 					t.Fatalf("node 2 didn't read msg")
 
-				case syncer1.gossipMsgs <- msg:
+				case syncer1.gossipMsgs <- replyEnvelope{
+					gen: syncer1.chanRangeQueryGen.Load(),
+					msg: msg,
+				}:
 				}
 			}
 		}
@@ -1965,7 +2037,10 @@ func TestGossipSyncerRoutineSync(t *testing.T) {
 			case <-time.After(time.Second * 2):
 				t.Fatalf("node 2 didn't read msg")
 
-			case syncer2.gossipMsgs <- msg:
+			case syncer2.gossipMsgs <- replyEnvelope{
+				gen: syncer2.chanRangeQueryGen.Load(),
+				msg: msg,
+			}:
 
 			}
 		}
@@ -2099,7 +2174,10 @@ func TestGossipSyncerAlreadySynced(t *testing.T) {
 				case <-time.After(time.Second * 2):
 					t.Fatalf("node 2 didn't read msg")
 
-				case syncer2.gossipMsgs <- msg:
+				case syncer2.gossipMsgs <- replyEnvelope{
+					gen: syncer2.chanRangeQueryGen.Load(),
+					msg: msg,
+				}:
 				}
 			}
 		}
@@ -2122,7 +2200,10 @@ func TestGossipSyncerAlreadySynced(t *testing.T) {
 				case <-time.After(time.Second * 2):
 					t.Fatalf("node 2 didn't read msg")
 
-				case syncer1.gossipMsgs <- msg:
+				case syncer1.gossipMsgs <- replyEnvelope{
+					gen: syncer1.chanRangeQueryGen.Load(),
+					msg: msg,
+				}:
 				}
 			}
 		}
@@ -2165,7 +2246,10 @@ func TestGossipSyncerAlreadySynced(t *testing.T) {
 			case <-time.After(time.Second * 2):
 				t.Fatalf("node 2 didn't read msg")
 
-			case syncer2.gossipMsgs <- msg:
+			case syncer2.gossipMsgs <- replyEnvelope{
+				gen: syncer2.chanRangeQueryGen.Load(),
+				msg: msg,
+			}:
 
 			}
 		}
@@ -2187,7 +2271,10 @@ func TestGossipSyncerAlreadySynced(t *testing.T) {
 			case <-time.After(time.Second * 2):
 				t.Fatalf("node 2 didn't read msg")
 
-			case syncer1.gossipMsgs <- msg:
+			case syncer1.gossipMsgs <- replyEnvelope{
+				gen: syncer1.chanRangeQueryGen.Load(),
+				msg: msg,
+			}:
 
 			}
 		}
@@ -2621,12 +2708,242 @@ func TestGossipSyncerMaxChannelRangeSCIDs(t *testing.T) {
 		lnwire.NewShortChanIDFromInt(uint64(len(scids))),
 	}
 	err = syncer.processChanRangeReply(ctx, reply)
+	require.ErrorIs(t, err, errChanRangeReplyTooLarge)
 	require.ErrorContains(
 		t, err, "exceeds maximum number of short channel IDs",
 	)
 	require.Empty(t, syncer.bufferedChanRangeReplies)
 	require.Zero(t, syncer.numChanRangeReplySCIDsRcvd)
 	require.Nil(t, syncer.curQueryRangeMsg)
+}
+
+// TestGossipSyncerRotatesOnRejectedChannelRange ensures that a rejected range
+// response requests another historical syncer without stopping this one.
+func TestGossipSyncerRotatesOnRejectedChannelRange(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		mutate      func(*GossipSyncer, *lnwire.ReplyChannelRange)
+		expectedErr error
+	}{
+		{
+			name: "SCID limit",
+			mutate: func(syncer *GossipSyncer,
+				reply *lnwire.ReplyChannelRange) {
+
+				syncer.numChanRangeReplySCIDsRcvd =
+					maxChanRangeReplySCIDs
+				reply.ShortChanIDs = []lnwire.ShortChannelID{{
+					BlockHeight: reply.FirstBlockHeight,
+				}}
+			},
+			expectedErr: errChanRangeReplyTooLarge,
+		},
+		{
+			name: "range before query",
+			mutate: func(_ *GossipSyncer,
+				reply *lnwire.ReplyChannelRange) {
+
+				reply.FirstBlockHeight--
+			},
+			expectedErr: errInvalidChanRangeReply,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			msgChan, syncer, _ := newTestSyncer(
+				lnwire.ShortChannelID{
+					BlockHeight: latestKnownHeight,
+				}, defaultEncoding, defaultChunkSize,
+			)
+			failureErr := make(chan error, 1)
+			syncer.cfg.historicalSyncFailed = func(_ *GossipSyncer,
+				err error) {
+
+				failureErr <- err
+			}
+
+			syncer.Start()
+			defer syncer.Stop()
+
+			var query *lnwire.QueryChannelRange
+			select {
+			case msgs := <-msgChan:
+				require.Len(t, msgs, 1)
+				var ok bool
+				query, ok = msgs[0].(*lnwire.QueryChannelRange)
+				require.True(t, ok)
+
+			case <-time.After(time.Second):
+				t.Fatal("expected channel range query")
+			}
+
+			require.Eventually(t, func() bool {
+				state := syncer.syncState()
+
+				return state == waitingQueryRangeReply
+			}, time.Second, 10*time.Millisecond)
+
+			reply := &lnwire.ReplyChannelRange{
+				ChainHash:        query.ChainHash,
+				FirstBlockHeight: query.FirstBlockHeight,
+				NumBlocks:        query.NumBlocks,
+				EncodingType:     lnwire.EncodingSortedPlain,
+			}
+			test.mutate(syncer, reply)
+			require.NoError(
+				t, syncer.ProcessQueryMsg(reply, nil),
+			)
+
+			select {
+			case err := <-failureErr:
+				require.ErrorIs(t, err, test.expectedErr)
+
+			case <-time.After(time.Second):
+				t.Fatal("expected historical sync failure")
+			}
+
+			require.Eventually(t, func() bool {
+				return syncer.syncState() == chansSynced
+			}, time.Second, 10*time.Millisecond)
+			syncType := syncer.SyncType()
+			require.NoError(
+				t, syncer.ProcessSyncTransition(syncType),
+			)
+		})
+	}
+}
+
+// TestGossipSyncerDoesNotReuseQueuedRangeReply ensures that a
+// ReplyChannelRange accepted for one query attempt and left queued when
+// that attempt fails cannot be consumed as a response to a later attempt.
+func TestGossipSyncerDoesNotReuseQueuedRangeReply(t *testing.T) {
+	t.Parallel()
+
+	msgChan, syncer, _ := newTestSyncer(
+		lnwire.ShortChannelID{
+			BlockHeight: latestKnownHeight,
+		}, defaultEncoding, defaultChunkSize,
+	)
+	failureErr := make(chan error, 2)
+	syncer.cfg.historicalSyncFailed = func(_ *GossipSyncer, err error) {
+		failureErr <- err
+	}
+
+	syncer.Start()
+	defer syncer.Stop()
+
+	var query *lnwire.QueryChannelRange
+	select {
+	case msgs := <-msgChan:
+		require.Len(t, msgs, 1)
+		var ok bool
+		query, ok = msgs[0].(*lnwire.QueryChannelRange)
+		require.True(t, ok)
+
+	case <-time.After(time.Second):
+		t.Fatal("expected channel range query")
+	}
+
+	require.Eventually(t, func() bool {
+		return syncer.syncState() == waitingQueryRangeReply
+	}, time.Second, 10*time.Millisecond)
+
+	// Queue two replies while the syncer's goroutine has not yet read
+	// either: an invalid one that fails the current attempt, and a
+	// second one that must not be interpreted as a response to the
+	// attempt that follows.
+	// The replies below are crafted to not be considered legacy, so
+	// that the range validation applies to them. The invalid reply
+	// starts one block below the queried range, which is rejected.
+	invalidReply := &lnwire.ReplyChannelRange{
+		ChainHash:        query.ChainHash,
+		FirstBlockHeight: query.FirstBlockHeight - 1,
+		NumBlocks:        query.NumBlocks,
+		EncodingType:     lnwire.EncodingSortedPlain,
+	}
+	// The second reply is crafted to be invalid for both attempts: the
+	// retry queries from the genesis block, so the first attempt's
+	// starting height would be accepted there. Instead, start one
+	// block past the first query's last covered height, which neither
+	// attempt's range contains. If it were wrongly consumed as the
+	// response to the new attempt below it would fail that attempt,
+	// which the test detects through the failure callback.
+	secondReply := &lnwire.ReplyChannelRange{
+		ChainHash:        query.ChainHash,
+		FirstBlockHeight: query.LastBlockHeight() + 1,
+		NumBlocks:        query.NumBlocks,
+		EncodingType:     lnwire.EncodingSortedPlain,
+	}
+	require.NoError(t, syncer.ProcessQueryMsg(invalidReply, nil))
+	require.NoError(t, syncer.ProcessQueryMsg(secondReply, nil))
+
+	select {
+	case err := <-failureErr:
+		require.ErrorIs(t, err, errInvalidChanRangeReply)
+
+	case <-time.After(time.Second):
+		t.Fatal("expected historical sync failure")
+	}
+
+	require.Eventually(t, func() bool {
+		return syncer.syncState() == chansSynced
+	}, time.Second, 10*time.Millisecond)
+
+	// The failed attempt consumed the first reply, so the second one
+	// must still be queued while no attempt is reading from it.
+	require.Len(t, syncer.gossipMsgs, 1)
+
+	// Start a new attempt. Its query generation differs from the one
+	// the queued reply was accepted for, so the reply must be discarded
+	// and the new attempt must stay waiting rather than treating the
+	// stale reply as its response.
+	require.NoError(t, syncer.historicalSync())
+
+	// After returning to chansSynced the syncer first sends its update
+	// horizon, so drain that before awaiting the new query.
+	select {
+	case msgs := <-msgChan:
+		_, ok := msgs[0].(*lnwire.GossipTimestampRange)
+		require.True(t, ok)
+
+	case <-time.After(time.Second):
+		t.Fatal("expected update horizon")
+	}
+
+	select {
+	case msgs := <-msgChan:
+		require.Len(t, msgs, 1)
+		_, ok := msgs[0].(*lnwire.QueryChannelRange)
+		require.True(t, ok)
+
+	case <-time.After(time.Second):
+		t.Fatal("expected new channel range query")
+	}
+
+	require.Eventually(t, func() bool {
+		return syncer.syncState() == waitingQueryRangeReply
+	}, time.Second, 10*time.Millisecond)
+
+	// The stale reply is consumed and dropped without failing the new
+	// attempt or completing it. The queue drains as the reply is
+	// discarded, and the syncer must still be waiting for the response
+	// to the new query, with no failure reported for it.
+	require.Eventually(t, func() bool {
+		return len(syncer.gossipMsgs) == 0
+	}, time.Second, 10*time.Millisecond)
+
+	select {
+	case err := <-failureErr:
+		t.Fatalf("new attempt failed from stale reply: %v", err)
+
+	case <-time.After(200 * time.Millisecond):
+	}
+	require.Equal(t, waitingQueryRangeReply, syncer.syncState())
 }
 
 // TestGossipSyncerChanRangeReplyNoQuery ensures that a range reply which
@@ -2834,12 +3151,10 @@ func TestGossipSyncerStateHandlerErrors(t *testing.T) {
 				// racing the syncer's own goroutine.
 				assertRangeSyncAborted(t, s)
 
-				// NOTE: the syncer is left in
-				// waitingQueryRangeReply with no live handler.
-				// That matches how every other terminal error
-				// in this state machine behaves today.
+				// The peer remains connected and the syncer
+				// returns to its terminal state.
 				require.Equal(
-					t, waitingQueryRangeReply,
+					t, chansSynced,
 					s.syncState(),
 				)
 			},

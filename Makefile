@@ -36,7 +36,7 @@ ACTIVE_GO_VERSION_MINOR := $(shell echo $(ACTIVE_GO_VERSION) | cut -d. -f2)
 # GO_VERSION is the Go version used for the release build, docker files, and
 # GitHub Actions. This is the reference version for the project. All other Go
 # versions are checked against this version.
-GO_VERSION = 1.26.4
+GO_VERSION = 1.27.1
 
 GOBUILD := $(GOCC) build -v
 GOINSTALL := $(GOCC) install -v
@@ -199,7 +199,11 @@ release: clean-mobile
 	./scripts/release.sh build-release "$(VERSION_TAG)" "$(BUILD_SYSTEM)" "$(RELEASE_TAGS)" "$(RELEASE_LDFLAGS)" "$(GO_VERSION)"
 
 #? docker-release: Same as release but within a docker container to support reproducible builds on BSD/MacOS platforms
-docker-release:
+docker-release-cache:
+	$(call check_docker_release_cache,$(DOCKER_RELEASE_GOCACHE))
+	$(call check_docker_release_cache,$(DOCKER_RELEASE_GOMODCACHE))
+
+docker-release: docker-release-cache
 	@$(call print, "Building release helper docker image.")
 	if [ "$(tag)" = "" ]; then echo "Must specify tag=<commit_or_tag>!"; exit 1; fi
 
